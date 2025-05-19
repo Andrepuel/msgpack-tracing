@@ -1,4 +1,6 @@
-use crate::tape::{CacheStringOwned, FieldValueOwned, Instruction, TapeMachine, ValueOwned};
+use crate::tape::{
+    CacheStringOwned, FieldValueOwned, Instruction, SpanRecords, TapeMachine, ValueOwned,
+};
 use chrono::{DateTime, Utc};
 use nu_ansi_term::{Color, Style};
 use std::fmt::Write;
@@ -100,8 +102,15 @@ impl<W> TapeMachine for Printer<W>
 where
     W: io::Write + Send + 'static,
 {
+    fn needs_restart(&mut self) -> bool {
+        false
+    }
+
     fn handle(&mut self, instruction: Instruction) {
         match instruction {
+            Instruction::Restart => {
+                self.strings.clear();
+            }
             Instruction::NewString(string) => self.strings.push(string.to_owned()),
             Instruction::NewSpan { parent, span, name } => {
                 assert!(self.new_records.is_none());
@@ -207,12 +216,6 @@ where
             }
         }
     }
-}
-
-pub struct SpanRecords {
-    parent: Option<NonZeroU64>,
-    name: CacheStringOwned,
-    records: Vec<FieldValueOwned>,
 }
 
 pub struct NewEvent {

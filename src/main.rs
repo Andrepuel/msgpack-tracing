@@ -1,19 +1,22 @@
 use std::fs::File;
 pub mod printer;
+pub mod rotate;
 pub mod storage;
 pub mod tape;
 
 fn main() {
-    {
-        tape::install(storage::Store::new(File::create("out.log").unwrap()));
-        tracing::info!("Installed logger");
-        recurse(5, 2);
-    }
-
-    {
-        storage::Load::new(File::open("out.log").unwrap())
+    if let Some(read) = std::env::args().nth(1) {
+        storage::Load::new(File::open(read).unwrap())
             .forward(&mut printer::Printer::new(std::io::stdout()))
             .unwrap();
+        return;
+    }
+
+    tape::install(rotate::Rotate::new("out.log", 64 * 1024 * 1024).unwrap());
+    tracing::info!("Installed logger");
+    for i in 0.. {
+        tracing::info!(i, "Spamming logs");
+        recurse(i % 10, 2);
     }
 }
 

@@ -1,5 +1,10 @@
 use chrono::{DateTime, Utc};
-use std::{collections::HashMap, num::NonZeroU64, ops::DerefMut, sync::Mutex};
+use std::{
+    collections::HashMap,
+    num::NonZeroU64,
+    ops::DerefMut,
+    sync::{Mutex, MutexGuard},
+};
 use tracing::{
     Level, Subscriber,
     field::{Field, Visit},
@@ -26,11 +31,13 @@ pub fn install<T: TapeMachine>(machine: T) {
 }
 
 pub trait TapeMachine: Send + 'static {
+    fn needs_restart(&mut self) -> bool;
     fn handle(&mut self, instruction: Instruction);
 }
 
 #[derive(Clone, Copy)]
 pub enum Instruction<'a> {
+    Restart,
     NewString(&'a str),
     NewSpan {
         parent: Option<NonZeroU64>,
@@ -53,6 +60,7 @@ pub enum Instruction<'a> {
 impl Instruction<'_> {
     pub fn id(self) -> InstructionId {
         match self {
+            Instruction::Restart => InstructionId::Restart,
             Instruction::NewString(..) => InstructionId::NewString,
             Instruction::NewSpan { .. } => InstructionId::NewSpan,
             Instruction::FinishedSpan => InstructionId::FinishedSpan,
@@ -68,6 +76,7 @@ impl Instruction<'_> {
 
 #[derive(Clone, Copy)]
 pub enum InstructionId {
+    Restart,
     NewString,
     NewSpan,
     FinishedSpan,
@@ -81,6 +90,7 @@ pub enum InstructionId {
 impl From<InstructionId> for u8 {
     fn from(val: InstructionId) -> Self {
         match val {
+            InstructionId::Restart => 255,
             InstructionId::NewString => 1,
             InstructionId::NewSpan => 2,
             InstructionId::FinishedSpan => 4,
@@ -98,6 +108,7 @@ impl TryFrom<u8> for InstructionId {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         Ok(match value {
+            255 => InstructionId::Restart,
             1 => InstructionId::NewString,
             2 => InstructionId::NewSpan,
             4 => InstructionId::FinishedSpan,
@@ -213,17 +224,39 @@ pub enum CacheStringOwned {
     Small(String),
     Cached(u64),
 }
+impl CacheStringOwned {
+    pub fn read<'a>(&'a self, strings: &'a [String]) -> &'a str {
+        match self {
+            CacheStringOwned::Small(str) => str,
+            CacheStringOwned::Cached(index) => strings[*index as usize].as_str(),
+        }
+    }
+}
 
-pub struct TapeMachineLogger<T>(Mutex<TapeMachineLoggerInner<T>>);
+pub struct TapeMachineLogger<T> {
+    inner: Mutex<TapeMachineLoggerInner<T>>,
+}
 impl<T> TapeMachineLogger<T>
 where
     T: TapeMachine,
 {
-    pub fn new(machine: T) -> Self {
-        TapeMachineLogger(Mutex::new(TapeMachineLoggerInner {
-            machine,
-            strings: Default::default(),
-        }))
+    pub fn new(mut machine: T) -> Self {
+        machine.handle(Instruction::Restart);
+        TapeMachineLogger {
+            inner: Mutex::new(TapeMachineLoggerInner {
+                machine,
+                strings: Default::default(),
+                recover: Default::default(),
+            }),
+        }
+    }
+
+    fn machine(&self) -> MutexGuard<'_, TapeMachineLoggerInner<T>> {
+        let mut machine = self.inner.lock().unwrap();
+        if machine.machine.needs_restart() {
+            machine.restart();
+        }
+        machine
     }
 }
 impl<T, S> Layer<S> for TapeMachineLogger<T>
@@ -237,7 +270,7 @@ where
         id: &span::Id,
         ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut machine = self.0.lock().unwrap();
+        let mut machine = self.machine();
         let name = machine.cache_string(attrs.metadata().name());
         let span = ctx.span(id).unwrap();
         machine.handle(Instruction::NewSpan {
@@ -255,14 +288,14 @@ where
         values: &span::Record<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut machine = self.0.lock().unwrap();
+        let mut machine = self.machine();
         machine.handle(Instruction::NewRecord(id.into_non_zero_u64()));
         values.record(&mut VisitMachine(machine.deref_mut()));
         machine.handle(Instruction::FinishedRecord);
     }
 
     fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
-        let mut machine = self.0.lock().unwrap();
+        let mut machine = self.machine();
 
         let time = Utc::now();
         let span = ctx
@@ -282,7 +315,7 @@ where
     }
 
     fn on_close(&self, id: span::Id, _ctx: tracing_subscriber::layer::Context<'_, S>) {
-        let mut machine = self.0.lock().unwrap();
+        let mut machine = self.machine();
         machine.handle(Instruction::DeleteSpan(id.into_non_zero_u64()));
     }
 }
@@ -290,17 +323,26 @@ where
 struct TapeMachineLoggerInner<T> {
     machine: T,
     strings: HashMap<String, u64>,
+    recover: RecoverSpan,
 }
 impl<T> TapeMachineLoggerInner<T>
 where
     T: TapeMachine,
 {
     fn cache_string<'a>(&mut self, string: &'a str) -> CacheString<'a> {
-        if let Some(id) = self.strings.get(string) {
+        Self::do_cache_string(&mut self.machine, &mut self.strings, string)
+    }
+
+    fn do_cache_string<'a>(
+        machine: &mut T,
+        strings: &mut HashMap<String, u64>,
+        string: &'a str,
+    ) -> CacheString<'a> {
+        if let Some(id) = strings.get(string) {
             return CacheString::Cached(*id);
         }
 
-        let id = self.strings.len() as u64;
+        let id = strings.len() as u64;
         let small = !matches!(
             (id, string.len()),
             (0..=0xffff, 4..)
@@ -312,8 +354,8 @@ where
         if small {
             CacheString::Small(string)
         } else {
-            self.machine.handle(Instruction::NewString(string));
-            self.strings.insert(string.to_owned(), id);
+            machine.handle(Instruction::NewString(string));
+            strings.insert(string.to_owned(), id);
             CacheString::Cached(id)
         }
     }
@@ -329,7 +371,48 @@ where
     }
 
     fn handle(&mut self, instruction: Instruction) {
+        self.recover.handle(instruction);
         self.machine.handle(instruction);
+    }
+
+    fn restart(&mut self) {
+        let mut strings = vec![String::default(); self.strings.len()];
+        for (string, index) in std::mem::take(&mut self.strings).into_iter() {
+            strings[index as usize] = string;
+        }
+
+        self.machine.handle(Instruction::Restart);
+
+        for (span, records) in self.recover.span.iter() {
+            let name = records.name.read(&strings);
+            let name = Self::do_cache_string(&mut self.machine, &mut self.strings, name);
+            self.machine.handle(Instruction::NewSpan {
+                parent: records.parent,
+                span: *span,
+                name,
+            });
+
+            for record in records.records.iter() {
+                let name = record.name.read(&strings);
+                let name = Self::do_cache_string(&mut self.machine, &mut self.strings, name);
+                let value: Value = match &record.value {
+                    ValueOwned::String(str) => {
+                        let str = str.read(&strings);
+                        Self::do_cache_string(&mut self.machine, &mut self.strings, str).into()
+                    }
+                    ValueOwned::Float(value) => (*value).into(),
+                    ValueOwned::Integer(value) => (*value).into(),
+                    ValueOwned::Unsigned(value) => (*value).into(),
+                    ValueOwned::Bool(value) => (*value).into(),
+                    ValueOwned::ByteArray(items) => Value::ByteArray(items),
+                };
+
+                self.machine
+                    .handle(Instruction::AddValue(FieldValue { name, value }));
+            }
+
+            self.machine.handle(Instruction::FinishedSpan);
+        }
     }
 }
 
@@ -383,5 +466,49 @@ where
 
     fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
         self.record_str(field, &value.to_string())
+    }
+}
+
+pub struct SpanRecords {
+    pub parent: Option<NonZeroU64>,
+    pub name: CacheStringOwned,
+    pub records: Vec<FieldValueOwned>,
+}
+
+#[derive(Default)]
+struct RecoverSpan {
+    span: HashMap<NonZeroU64, SpanRecords>,
+    current: Option<(NonZeroU64, SpanRecords)>,
+}
+impl RecoverSpan {
+    pub fn handle(&mut self, instruction: Instruction) {
+        match instruction {
+            Instruction::NewSpan { parent, span, name } => {
+                assert!(self.current.is_none());
+                let records = SpanRecords {
+                    parent,
+                    name: name.to_owned(),
+                    records: Default::default(),
+                };
+
+                self.current = Some((span, records));
+            }
+            Instruction::FinishedSpan => {
+                let (k, v) = self.current.take().unwrap();
+                self.span.insert(k, v);
+            }
+            Instruction::NewRecord(span) => {
+                assert!(self.current.is_none());
+                self.current = Some(self.span.remove_entry(&span).unwrap());
+            }
+            Instruction::FinishedRecord => {
+                let (k, v) = self.current.take().unwrap();
+                self.span.insert(k, v);
+            }
+            Instruction::DeleteSpan(span) => {
+                self.span.remove(&span);
+            }
+            _ => {}
+        }
     }
 }

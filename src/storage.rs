@@ -16,21 +16,22 @@ where
         Self(out)
     }
 
-    pub fn do_handle(&mut self, instruction: Instruction) -> io::Result<()> {
-        self.0.write_all(&[instruction.id().into()])?;
+    pub fn do_handle(write: &mut W, instruction: Instruction) -> io::Result<()> {
+        write.write_all(&[instruction.id().into()])?;
         match instruction {
-            Instruction::NewString(data) => encode::write_str(&mut self.0, data)?,
+            Instruction::Restart => (),
+            Instruction::NewString(data) => encode::write_str(write, data)?,
             Instruction::NewSpan { parent, span, name } => {
                 let parent = parent.map(Into::into).unwrap_or(0);
                 let span = span.into();
-                encode::write_uint(&mut self.0, parent)?;
-                encode::write_uint(&mut self.0, span)?;
-                self.write_cache_str(name)?;
+                encode::write_uint(write, parent)?;
+                encode::write_uint(write, span)?;
+                Self::write_cache_str(write, name)?;
             }
             Instruction::FinishedSpan => (),
             Instruction::NewRecord(span) => {
                 let span: u64 = span.into();
-                encode::write_uint(&mut self.0, span)?;
+                encode::write_uint(write, span)?;
             }
             Instruction::FinishedRecord => (),
             Instruction::StartEvent {
@@ -44,49 +45,49 @@ where
                 let span = span.map(Into::into).unwrap_or(0);
                 let priority = priority_num(priority);
 
-                encode::write_uint(&mut self.0, time)?;
-                encode::write_uint(&mut self.0, time2 as u64)?;
-                encode::write_uint(&mut self.0, span)?;
-                self.write_cache_str(target)?;
-                encode::write_uint(&mut self.0, priority)?;
+                encode::write_uint(write, time)?;
+                encode::write_uint(write, time2 as u64)?;
+                encode::write_uint(write, span)?;
+                Self::write_cache_str(write, target)?;
+                encode::write_uint(write, priority)?;
             }
             Instruction::FinishedEvent => (),
             Instruction::AddValue(field_value) => {
-                self.write_cache_str(field_value.name)?;
-                self.write_cache_value(field_value.value)?;
+                Self::write_cache_str(write, field_value.name)?;
+                Self::write_cache_value(write, field_value.value)?;
             }
             Instruction::DeleteSpan(span) => {
                 let span = span.into();
-                encode::write_uint(&mut self.0, span)?;
+                encode::write_uint(write, span)?;
             }
         }
 
         Ok(())
     }
 
-    fn write_cache_str(&mut self, str: CacheString) -> io::Result<()> {
+    fn write_cache_str(write: &mut W, str: CacheString) -> io::Result<()> {
         match str {
-            CacheString::Small(data) => encode::write_str(&mut self.0, data)?,
+            CacheString::Small(data) => encode::write_str(write, data)?,
             CacheString::Cached(index) => {
-                CacheIndex::from(index).write(&mut self.0)?;
+                CacheIndex::from(index).write(write)?;
             }
         }
 
         Ok(())
     }
 
-    fn write_cache_value(&mut self, value: Value) -> io::Result<()> {
+    fn write_cache_value(write: &mut W, value: Value) -> io::Result<()> {
         match value {
-            Value::String(str) => self.write_cache_str(str)?,
-            Value::Float(data) => encode::write_f64(&mut self.0, data)?,
+            Value::String(str) => Self::write_cache_str(write, str)?,
+            Value::Float(data) => encode::write_f64(write, data)?,
             Value::Integer(data) => {
-                encode::write_sint(&mut self.0, data)?;
+                encode::write_sint(write, data)?;
             }
             Value::Unsigned(data) => {
-                encode::write_uint(&mut self.0, data)?;
+                encode::write_uint(write, data)?;
             }
-            Value::Bool(data) => encode::write_bool(&mut self.0, data)?,
-            Value::ByteArray(data) => encode::write_bin(&mut self.0, data)?,
+            Value::Bool(data) => encode::write_bool(write, data)?,
+            Value::ByteArray(data) => encode::write_bin(write, data)?,
         }
 
         Ok(())
@@ -96,24 +97,34 @@ impl<W> TapeMachine for Store<W>
 where
     W: io::Write + Send + 'static,
 {
+    fn needs_restart(&mut self) -> bool {
+        false
+    }
+
     fn handle(&mut self, instruction: Instruction) {
-        if let Err(e) = self.do_handle(instruction) {
+        if let Err(e) = Self::do_handle(&mut self.0, instruction) {
             panic!("{e}")
         }
     }
 }
 
-pub struct Load<R>(BufReader<R>, Vec<u8>, Vec<u8>);
+pub struct Load<R> {
+    read: BufReader<R>,
+    buf1: Vec<u8>,
+    buf2: Vec<u8>,
+    started: bool,
+}
 impl<R> Load<R>
 where
     R: io::Read,
 {
     pub fn new(input: R) -> Self {
-        Self(
-            BufReader::new(input),
-            Default::default(),
-            Default::default(),
-        )
+        Self {
+            read: BufReader::new(input),
+            buf1: Default::default(),
+            buf2: Default::default(),
+            started: false,
+        }
     }
 
     pub fn forward<T: TapeMachine>(&mut self, machine: &mut T) -> io::Result<()> {
@@ -125,21 +136,31 @@ where
     }
 
     pub fn fetch_one(&mut self) -> io::Result<Option<Instruction>> {
-        let Some(instruction) = self.0.fill_buf()?.first().copied() else {
-            return Ok(None);
+        let instruction = loop {
+            let Some(instruction) = self.read.fill_buf()?.first().copied() else {
+                return Ok(None);
+            };
+            self.read.consume(1);
+
+            if self.started {
+                break instruction;
+            }
+
+            if instruction == u8::from(InstructionId::Restart) {
+                self.started = true;
+            }
         };
 
         let instruction = InstructionId::try_from(instruction).map_err(|e| {
             io::Error::new(io::ErrorKind::InvalidData, format!("bad instruction {e}"))
         })?;
 
-        self.0.consume(1);
-
         Ok(Some(match instruction {
+            InstructionId::Restart => Instruction::Restart,
             InstructionId::NewString => Instruction::NewString(self.read_str()?),
             InstructionId::NewSpan => {
-                let parent: u64 = decode::read_int(&mut self.0).map_err(decode_err)?;
-                let span: u64 = decode::read_int(&mut self.0).map_err(decode_err)?;
+                let parent: u64 = decode::read_int(&mut self.read).map_err(decode_err)?;
+                let span: u64 = decode::read_int(&mut self.read).map_err(decode_err)?;
                 let name = self.read_cache_str()?;
 
                 Instruction::NewSpan {
@@ -150,17 +171,17 @@ where
             }
             InstructionId::FinishedSpan => Instruction::FinishedSpan,
             InstructionId::NewRecord => {
-                let span = decode::read_int(&mut self.0).map_err(decode_err)?;
+                let span = decode::read_int(&mut self.read).map_err(decode_err)?;
 
                 Instruction::NewRecord(NonZeroU64::new(span).ok_or(ZeroSpan)?)
             }
             InstructionId::FinishedRecord => Instruction::FinishedRecord,
             InstructionId::StartEvent => {
-                let time: u64 = decode::read_int(&mut self.0).map_err(decode_err)?;
-                let time2: u64 = decode::read_int(&mut self.0).map_err(decode_err)?;
-                let span = decode::read_int(&mut self.0).map_err(decode_err)?;
-                let target = Self::do_read_cache_str(&mut self.0, &mut self.1)?;
-                let priority = num_priority(decode::read_int(&mut self.0).map_err(decode_err)?);
+                let time: u64 = decode::read_int(&mut self.read).map_err(decode_err)?;
+                let time2: u64 = decode::read_int(&mut self.read).map_err(decode_err)?;
+                let span = decode::read_int(&mut self.read).map_err(decode_err)?;
+                let target = Self::do_read_cache_str(&mut self.read, &mut self.buf1)?;
+                let priority = num_priority(decode::read_int(&mut self.read).map_err(decode_err)?);
 
                 Instruction::StartEvent {
                     time: DateTime::from_timestamp(time as i64, time2 as u32).unwrap_or_default(),
@@ -171,20 +192,20 @@ where
             }
             InstructionId::FinishedEvent => Instruction::FinishedEvent,
             InstructionId::AddValue => {
-                let name = Self::do_read_cache_str(&mut self.0, &mut self.1)?;
-                let value = Self::do_read_value(&mut self.0, &mut self.2)?;
+                let name = Self::do_read_cache_str(&mut self.read, &mut self.buf1)?;
+                let value = Self::do_read_value(&mut self.read, &mut self.buf2)?;
 
                 Instruction::AddValue(FieldValue { name, value })
             }
             InstructionId::DeleteSpan => {
-                let span: u64 = decode::read_int(&mut self.0).map_err(decode_err)?;
+                let span: u64 = decode::read_int(&mut self.read).map_err(decode_err)?;
                 Instruction::DeleteSpan(NonZeroU64::new(span).ok_or(ZeroSpan)?)
             }
         }))
     }
 
     fn read_str(&mut self) -> io::Result<&str> {
-        Self::do_read_str(&mut self.0, &mut self.1)
+        Self::do_read_str(&mut self.read, &mut self.buf1)
     }
 
     fn do_read_str<'a>(read: &mut BufReader<R>, buf: &'a mut Vec<u8>) -> io::Result<&'a str> {
@@ -229,7 +250,7 @@ where
     }
 
     fn read_cache_str(&mut self) -> io::Result<CacheString> {
-        Self::do_read_cache_str(&mut self.0, &mut self.1)
+        Self::do_read_cache_str(&mut self.read, &mut self.buf1)
     }
 
     fn do_read_cache_str<'a>(
