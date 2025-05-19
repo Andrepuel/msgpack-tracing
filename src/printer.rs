@@ -2,14 +2,15 @@ use crate::tape::{CacheStringOwned, FieldValueOwned, Instruction, TapeMachine, V
 use chrono::{DateTime, Utc};
 use nu_ansi_term::{Color, Style};
 use std::fmt::Write;
+use std::num::NonZeroU64;
 use std::{collections::HashMap, io};
 use tracing::Level;
 
 pub struct Printer<W> {
     out: W,
     strings: Vec<String>,
-    span: HashMap<u64, SpanRecords>,
-    new_records: Option<(u64, SpanRecords)>,
+    span: HashMap<NonZeroU64, SpanRecords>,
+    new_records: Option<(NonZeroU64, SpanRecords)>,
     new_event: Option<NewEvent>,
 }
 impl<W> Printer<W>
@@ -52,7 +53,7 @@ where
         }
     }
 
-    fn span_iter<F>(&self, span: u64, f: &mut F)
+    fn span_iter<F>(&self, span: NonZeroU64, f: &mut F)
     where
         F: FnMut(&SpanRecords),
     {
@@ -188,6 +189,7 @@ where
 
                 writeln!(line).unwrap();
                 let _ = self.out.write_all(line.as_bytes());
+                let _ = self.out.flush();
             }
             Instruction::AddValue(field_value) => {
                 match (&mut self.new_records, &mut self.new_event) {
@@ -208,14 +210,14 @@ where
 }
 
 pub struct SpanRecords {
-    parent: Option<u64>,
+    parent: Option<NonZeroU64>,
     name: CacheStringOwned,
     records: Vec<FieldValueOwned>,
 }
 
 pub struct NewEvent {
     time: DateTime<Utc>,
-    span: Option<u64>,
+    span: Option<NonZeroU64>,
     target: CacheStringOwned,
     priority: Level,
     records: Vec<FieldValueOwned>,

@@ -1,13 +1,20 @@
+use std::fs::File;
 pub mod printer;
+pub mod storage;
 pub mod tape;
 
 fn main() {
-    tape::install(printer::Printer::new(std::io::stdout()));
-    // tracing_subscriber::fmt::init();
+    {
+        tape::install(storage::Store::new(File::create("out.log").unwrap()));
+        tracing::info!("Installed logger");
+        recurse(5, 2);
+    }
 
-    tracing::info!("Installed logger");
-
-    recurse(5, 2);
+    {
+        storage::Load::new(File::open("out.log").unwrap())
+            .forward(&mut printer::Printer::new(std::io::stdout()))
+            .unwrap();
+    }
 }
 
 fn recurse(level: i32, out: i32) {

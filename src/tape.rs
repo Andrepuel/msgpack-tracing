@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use std::{collections::HashMap, ops::DerefMut, sync::Mutex};
+use std::{collections::HashMap, num::NonZeroU64, ops::DerefMut, sync::Mutex};
 use tracing::{
     Level, Subscriber,
     field::{Field, Visit},
@@ -33,22 +33,83 @@ pub trait TapeMachine: Send + 'static {
 pub enum Instruction<'a> {
     NewString(&'a str),
     NewSpan {
-        parent: Option<u64>,
-        span: u64,
+        parent: Option<NonZeroU64>,
+        span: NonZeroU64,
         name: CacheString<'a>,
     },
     FinishedSpan,
-    NewRecord(u64),
+    NewRecord(NonZeroU64),
     FinishedRecord,
     StartEvent {
         time: DateTime<Utc>,
-        span: Option<u64>,
+        span: Option<NonZeroU64>,
         target: CacheString<'a>,
         priority: Level,
     },
     FinishedEvent,
     AddValue(FieldValue<'a>),
-    DeleteSpan(u64),
+    DeleteSpan(NonZeroU64),
+}
+impl Instruction<'_> {
+    pub fn id(self) -> InstructionId {
+        match self {
+            Instruction::NewString(..) => InstructionId::NewString,
+            Instruction::NewSpan { .. } => InstructionId::NewSpan,
+            Instruction::FinishedSpan => InstructionId::FinishedSpan,
+            Instruction::NewRecord(..) => InstructionId::NewRecord,
+            Instruction::FinishedRecord => InstructionId::FinishedRecord,
+            Instruction::StartEvent { .. } => InstructionId::StartEvent,
+            Instruction::FinishedEvent => InstructionId::FinishedEvent,
+            Instruction::AddValue(..) => InstructionId::AddValue,
+            Instruction::DeleteSpan(..) => InstructionId::DeleteSpan,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum InstructionId {
+    NewString,
+    NewSpan,
+    FinishedSpan,
+    NewRecord,
+    FinishedRecord,
+    StartEvent,
+    FinishedEvent,
+    AddValue,
+    DeleteSpan,
+}
+impl From<InstructionId> for u8 {
+    fn from(val: InstructionId) -> Self {
+        match val {
+            InstructionId::NewString => 1,
+            InstructionId::NewSpan => 2,
+            InstructionId::FinishedSpan => 4,
+            InstructionId::NewRecord => 8,
+            InstructionId::FinishedRecord => 16,
+            InstructionId::StartEvent => 32,
+            InstructionId::FinishedEvent => 64,
+            InstructionId::AddValue => 128,
+            InstructionId::DeleteSpan => 0,
+        }
+    }
+}
+impl TryFrom<u8> for InstructionId {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(match value {
+            1 => InstructionId::NewString,
+            2 => InstructionId::NewSpan,
+            4 => InstructionId::FinishedSpan,
+            8 => InstructionId::NewRecord,
+            16 => InstructionId::FinishedRecord,
+            32 => InstructionId::StartEvent,
+            64 => InstructionId::FinishedEvent,
+            128 => InstructionId::AddValue,
+            0 => InstructionId::DeleteSpan,
+            e => return Err(e),
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -180,8 +241,8 @@ where
         let name = machine.cache_string(attrs.metadata().name());
         let span = ctx.span(id).unwrap();
         machine.handle(Instruction::NewSpan {
-            parent: span.parent().map(|parent| parent.id().into_u64()),
-            span: id.into_u64(),
+            parent: span.parent().map(|parent| parent.id().into_non_zero_u64()),
+            span: id.into_non_zero_u64(),
             name,
         });
         attrs.record(&mut VisitMachine(machine.deref_mut()));
@@ -195,7 +256,7 @@ where
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
         let mut machine = self.0.lock().unwrap();
-        machine.handle(Instruction::NewRecord(id.into_u64()));
+        machine.handle(Instruction::NewRecord(id.into_non_zero_u64()));
         values.record(&mut VisitMachine(machine.deref_mut()));
         machine.handle(Instruction::FinishedRecord);
     }
@@ -204,7 +265,9 @@ where
         let mut machine = self.0.lock().unwrap();
 
         let time = Utc::now();
-        let span = ctx.event_span(event).map(|span| span.id().into_u64());
+        let span = ctx
+            .event_span(event)
+            .map(|span| span.id().into_non_zero_u64());
         let priority = *event.metadata().level();
         let target = machine.cache_string(event.metadata().target());
         machine.handle(Instruction::StartEvent {
@@ -220,7 +283,7 @@ where
 
     fn on_close(&self, id: span::Id, _ctx: tracing_subscriber::layer::Context<'_, S>) {
         let mut machine = self.0.lock().unwrap();
-        machine.handle(Instruction::DeleteSpan(id.into_u64()));
+        machine.handle(Instruction::DeleteSpan(id.into_non_zero_u64()));
     }
 }
 
