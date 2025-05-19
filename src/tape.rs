@@ -296,18 +296,26 @@ where
     T: TapeMachine,
 {
     fn cache_string<'a>(&mut self, string: &'a str) -> CacheString<'a> {
-        if string.len() <= 8 {
-            return CacheString::Small(string);
-        }
-
         if let Some(id) = self.strings.get(string) {
             return CacheString::Cached(*id);
         }
 
         let id = self.strings.len() as u64;
-        self.machine.handle(Instruction::NewString(string));
-        self.strings.insert(string.to_owned(), id);
-        CacheString::Cached(id)
+        let small = !matches!(
+            (id, string.len()),
+            (0..=0xffff, 4..)
+                | (0x1_0000..=0xff_ffff, 5..)
+                | (0x100_0000..=0xff_ffff_ffff, 7..)
+                | (_, 11..)
+        );
+
+        if small {
+            CacheString::Small(string)
+        } else {
+            self.machine.handle(Instruction::NewString(string));
+            self.strings.insert(string.to_owned(), id);
+            CacheString::Cached(id)
+        }
     }
 
     fn field_value<'a, V>(&mut self, field: &Field, value: V) -> FieldValue<'a>
