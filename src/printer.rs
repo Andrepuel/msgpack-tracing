@@ -1,6 +1,6 @@
 use crate::tape::{CacheStringOwned, FieldValueOwned, Instruction, TapeMachine, ValueOwned};
 use chrono::{DateTime, Utc};
-use std::borrow::Cow;
+use nu_ansi_term::{Color, Style};
 use std::fmt::Write;
 use std::{collections::HashMap, io};
 use tracing::Level;
@@ -33,22 +33,21 @@ where
         }
     }
 
-    fn write_value<'a>(&'a self, value: &'a ValueOwned) -> Cow<'a, str> {
+    fn write_value<O>(&self, value: &ValueOwned, mut out: O) -> std::fmt::Result
+    where
+        O: Write,
+    {
         match value {
-            ValueOwned::String(str) => Cow::Borrowed(self.get_str(str)),
-            ValueOwned::Float(value) => Cow::Owned(value.to_string()),
-            ValueOwned::Integer(value) => Cow::Owned(value.to_string()),
-            ValueOwned::Unsigned(value) => Cow::Owned(value.to_string()),
-            ValueOwned::Bool(value) => Cow::Owned(value.to_string()),
+            ValueOwned::String(str) => write!(out, "{:?}", self.get_str(str)),
+            ValueOwned::Float(value) => write!(out, "{value}"),
+            ValueOwned::Integer(value) => write!(out, "{value}"),
+            ValueOwned::Unsigned(value) => write!(out, "{value}"),
+            ValueOwned::Bool(value) => write!(out, "{value}"),
             ValueOwned::ByteArray(items) => {
-                let value =
-                    items
-                        .iter()
-                        .fold(String::with_capacity(items.len() * 2), |mut a, b| {
-                            write!(a, "{:02x}", *b).unwrap();
-                            a
-                        });
-                Cow::Owned(value)
+                for &char in items.iter() {
+                    write!(out, "{char:02x}")?;
+                }
+                Ok(())
             }
         }
     }
@@ -62,6 +61,38 @@ where
             self.span_iter(parent, f);
         }
         f(records);
+    }
+
+    fn level_style(level: Level) -> Color {
+        match level {
+            Level::TRACE => Color::Purple,
+            Level::DEBUG => Color::Blue,
+            Level::INFO => Color::Green,
+            Level::WARN => Color::Yellow,
+            Level::ERROR => Color::Red,
+        }
+    }
+
+    fn write_record<O>(
+        &self,
+        record: &FieldValueOwned,
+        with_message: bool,
+        mut out: O,
+    ) -> std::fmt::Result
+    where
+        O: Write,
+    {
+        let name = self.get_str(&record.name);
+
+        if name == "message" && with_message {
+            if let ValueOwned::String(str) = &record.value {
+                return write!(out, "{}", self.get_str(str));
+            }
+        }
+
+        let italic = Style::new().italic();
+        write!(out, "{}{name}{}=", italic.prefix(), italic.suffix())?;
+        self.write_value(&record.value, out)
     }
 }
 impl<W> TapeMachine for Printer<W>
@@ -106,35 +137,53 @@ where
                 });
             }
             Instruction::FinishedEvent => {
+                let dimmed = Style::new().dimmed();
+                let bold = Style::new().bold();
+
                 let new_event = self.new_event.take().unwrap();
                 let mut line = String::new();
-                write!(line, "{:?} {} ", new_event.time, new_event.priority).unwrap();
-                write!(line, "{}", self.get_str(&new_event.target)).unwrap();
+                write!(line, "{}", dimmed.prefix()).unwrap();
+                write!(line, "{:?}", new_event.time).unwrap();
+                write!(line, "{}", dimmed.suffix()).unwrap();
+
+                let level_color = Self::level_style(new_event.priority);
+                write!(
+                    line,
+                    "  {}{}{} ",
+                    level_color.prefix(),
+                    new_event.priority,
+                    level_color.suffix()
+                )
+                .unwrap();
 
                 if let Some(span) = new_event.span {
                     self.span_iter(span, &mut |span| {
                         let name = self.get_str(&span.name);
-                        write!(line, ":{name}{{").unwrap();
+
+                        write!(line, "{}{name}{{{}", bold.prefix(), bold.suffix()).unwrap();
                         for (idx, record) in span.records.iter().enumerate() {
                             if idx > 0 {
                                 write!(line, " ").unwrap();
                             }
-                            let field = self.get_str(&record.name);
-                            let value = self.write_value(&record.value);
-                            write!(line, "{field}={value}").unwrap();
+                            self.write_record(record, false, &mut line).unwrap();
                         }
                         write!(line, "}}").unwrap();
+                        write!(line, "{}", dimmed.paint(":")).unwrap();
                     });
                 }
 
+                write!(
+                    line,
+                    " {}{}:{}",
+                    dimmed.prefix(),
+                    self.get_str(&new_event.target),
+                    dimmed.suffix()
+                )
+                .unwrap();
+
                 for record in new_event.records.iter() {
-                    let field = self.get_str(&record.name);
-                    let value = self.write_value(&record.value);
-                    if field == "message" {
-                        write!(line, " {value}").unwrap();
-                    } else {
-                        write!(line, " {field}={value}").unwrap();
-                    }
+                    write!(line, " ").unwrap();
+                    self.write_record(record, true, &mut line).unwrap();
                 }
 
                 writeln!(line).unwrap();
