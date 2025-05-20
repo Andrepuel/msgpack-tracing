@@ -11,6 +11,7 @@ use tracing::Level;
 
 pub struct Printer<W> {
     out: W,
+    color: bool,
     span: HashMap<NonZeroU64, SpanRecords>,
     new_records: Option<(NonZeroU64, SpanRecords)>,
     new_event: Option<NewEvent>,
@@ -19,9 +20,10 @@ impl<W> Printer<W>
 where
     W: io::Write + Send + 'static,
 {
-    pub fn new(out: W) -> Self {
+    pub fn new(out: W, color: bool) -> Self {
         Self {
             out,
+            color,
             span: Default::default(),
             new_records: None,
             new_event: None,
@@ -42,67 +44,23 @@ where
         }
     }
 
-    fn write_value<O>(&self, value: &ValueOwned, mut out: O) -> std::fmt::Result
+    fn span_iter<'a, F>(&'a self, span: NonZeroU64, f: &mut F)
     where
-        O: Write,
-    {
-        match value {
-            ValueOwned::Debug(str) => write!(out, "{str}"),
-            ValueOwned::String(str) => write!(out, "{str:?}"),
-            ValueOwned::Float(value) => write!(out, "{value}"),
-            ValueOwned::Integer(value) => write!(out, "{value}"),
-            ValueOwned::Unsigned(value) => write!(out, "{value}"),
-            ValueOwned::Bool(value) => write!(out, "{value}"),
-            ValueOwned::ByteArray(items) => {
-                for &char in items.iter() {
-                    write!(out, "{char:02x}")?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn span_iter<F>(&self, span: NonZeroU64, f: &mut F)
-    where
-        F: FnMut(&SpanRecords),
+        F: FnMut(Cow<'a, SpanRecords>),
     {
         let records = self.get_span(span);
         if let Some(parent) = records.parent {
             self.span_iter(parent, f);
         }
-        f(&records);
+        f(records);
     }
 
-    fn level_style(level: Level) -> Color {
-        match level {
-            Level::TRACE => Color::Purple,
-            Level::DEBUG => Color::Blue,
-            Level::INFO => Color::Green,
-            Level::WARN => Color::Yellow,
-            Level::ERROR => Color::Red,
-        }
-    }
-
-    fn write_record<O>(
-        &self,
-        record: &FieldValueOwned,
-        with_message: bool,
-        mut out: O,
-    ) -> std::fmt::Result
-    where
-        O: Write,
-    {
-        let name = &record.name;
-
-        if name == "message" && with_message {
-            if let ValueOwned::String(str) = &record.value {
-                return write!(out, "{}", str);
-            }
-        }
-
-        let italic = Style::new().italic();
-        write!(out, "{}{name}{}=", italic.prefix(), italic.suffix())?;
-        self.write_value(&record.value, out)
+    fn span_from_root(&self, span: NonZeroU64) -> Vec<Cow<SpanRecords>> {
+        let mut r = Vec::new();
+        self.span_iter(span, &mut |records| {
+            r.push(records);
+        });
+        r
     }
 }
 impl<W> TapeMachine<InstructionSet> for Printer<W>
@@ -151,57 +109,16 @@ where
                 });
             }
             Instruction::FinishedEvent => {
-                let dimmed = Style::new().dimmed();
-                let bold = Style::new().bold();
-
                 let new_event = self.new_event.take().unwrap();
-                let mut line = String::new();
-                write!(line, "{}", dimmed.prefix()).unwrap();
-                write!(line, "{:?}", new_event.time).unwrap();
-                write!(line, "{}", dimmed.suffix()).unwrap();
+                let spans = new_event
+                    .span
+                    .map(|span| self.span_from_root(span))
+                    .unwrap_or_default();
 
-                let level_color = Self::level_style(new_event.priority);
-                write!(
-                    line,
-                    "  {}{}{} ",
-                    level_color.prefix(),
-                    new_event.priority,
-                    level_color.suffix()
-                )
-                .unwrap();
+                let line = new_event.to_line(self.color, &spans);
 
-                if let Some(span) = new_event.span {
-                    self.span_iter(span, &mut |span| {
-                        let name = &span.name;
-
-                        write!(line, "{}{name}{{{}", bold.prefix(), bold.suffix()).unwrap();
-                        for (idx, record) in span.records.iter().enumerate() {
-                            if idx > 0 {
-                                write!(line, " ").unwrap();
-                            }
-                            self.write_record(record, false, &mut line).unwrap();
-                        }
-                        write!(line, "}}").unwrap();
-                        write!(line, "{}", dimmed.paint(":")).unwrap();
-                    });
-                }
-
-                write!(
-                    line,
-                    " {}{}:{}",
-                    dimmed.prefix(),
-                    new_event.target,
-                    dimmed.suffix()
-                )
-                .unwrap();
-
-                for record in new_event.records.iter() {
-                    write!(line, " ").unwrap();
-                    self.write_record(record, true, &mut line).unwrap();
-                }
-
-                writeln!(line).unwrap();
                 let _ = self.out.write_all(line.as_bytes());
+                let _ = self.out.write_all(b"\n");
                 let _ = self.out.flush();
             }
             Instruction::AddValue(field_value) => {
@@ -223,9 +140,250 @@ where
 }
 
 pub struct NewEvent {
-    time: DateTime<Utc>,
-    span: Option<NonZeroU64>,
-    target: String,
-    priority: Level,
-    records: Vec<FieldValueOwned>,
+    pub time: DateTime<Utc>,
+    pub span: Option<NonZeroU64>,
+    pub target: String,
+    pub priority: Level,
+    pub records: Vec<FieldValueOwned>,
+}
+impl NewEvent {
+    pub fn to_line(&self, color: bool, spans: &[Cow<SpanRecords>]) -> String {
+        let mut line = String::new();
+        self.write_line(color, spans, &mut line);
+        line
+    }
+
+    pub fn write_line<W>(&self, color: bool, spans: &[Cow<SpanRecords>], line: &mut W)
+    where
+        W: Write,
+    {
+        let dimmed = color.then(|| Style::new().dimmed());
+        let bold = color.then(|| Style::new().bold());
+        let level_color = color.then(|| Self::level_style(self.priority));
+        let field_style = color.then(|| Style::new().italic());
+
+        Self::with_style(dimmed, line, |line| write!(line, "{:?}", self.time)).unwrap();
+        Self::with_style(level_color, line, |line| {
+            write!(line, " {}", Self::level_padded(self.priority))
+        })
+        .unwrap();
+
+        for (idx, span) in spans.iter().enumerate() {
+            if idx == 0 {
+                write!(line, " ").unwrap();
+            }
+
+            let name = &span.name;
+
+            Self::with_style(bold, line, |line| write!(line, "{name}{{")).unwrap();
+
+            for (idx, record) in span.records.iter().enumerate() {
+                if idx > 0 {
+                    write!(line, " ").unwrap();
+                }
+                Self::write_record(record, field_style, false, line).unwrap();
+            }
+            write!(line, "}}").unwrap();
+            Self::with_style(dimmed, line, |line| write!(line, ":")).unwrap();
+        }
+
+        Self::with_style(dimmed, line, |line| write!(line, " {}:", self.target)).unwrap();
+
+        for record in self.records.iter() {
+            write!(line, " ").unwrap();
+            Self::write_record(record, field_style, true, line).unwrap();
+        }
+    }
+
+    fn level_style(level: Level) -> Style {
+        match level {
+            Level::TRACE => Color::Purple,
+            Level::DEBUG => Color::Blue,
+            Level::INFO => Color::Green,
+            Level::WARN => Color::Yellow,
+            Level::ERROR => Color::Red,
+        }
+        .normal()
+    }
+
+    fn level_padded(level: Level) -> &'static str {
+        match level {
+            Level::TRACE => "TRACE",
+            Level::DEBUG => "DEBUG",
+            Level::INFO => " INFO",
+            Level::WARN => " WARN",
+            Level::ERROR => "ERROR",
+        }
+    }
+
+    fn write_record<W>(
+        record: &FieldValueOwned,
+        field_style: Option<Style>,
+        with_message: bool,
+        out: &mut W,
+    ) -> std::fmt::Result
+    where
+        W: Write,
+    {
+        let name = &record.name;
+
+        if name == "message" && with_message {
+            if let ValueOwned::Debug(str) = &record.value {
+                return write!(out, "{}", str);
+            }
+        }
+
+        Self::with_style(field_style, out, |out| write!(out, "{name}"))?;
+
+        write!(out, "=")?;
+        Self::write_value(&record.value, out)
+    }
+
+    fn write_value<W>(value: &ValueOwned, out: &mut W) -> std::fmt::Result
+    where
+        W: Write,
+    {
+        match value {
+            ValueOwned::Debug(str) => write!(out, "{str}"),
+            ValueOwned::String(str) => write!(out, "{str:?}"),
+            ValueOwned::Float(value) => write!(out, "{value}"),
+            ValueOwned::Integer(value) => write!(out, "{value}"),
+            ValueOwned::Unsigned(value) => write!(out, "{value}"),
+            ValueOwned::Bool(value) => write!(out, "{value}"),
+            ValueOwned::ByteArray(items) => {
+                for &char in items.iter() {
+                    write!(out, "{char:02x}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn with_style<W, F>(style: Option<Style>, out: &mut W, f: F) -> std::fmt::Result
+    where
+        W: Write,
+        F: FnOnce(&mut W) -> std::fmt::Result,
+    {
+        match style {
+            Some(style) => {
+                write!(out, "{}", style.prefix())?;
+                f(out)?;
+                write!(out, "{}", style.suffix())?;
+                Ok(())
+            }
+            None => f(out),
+        }
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+
+    #[test]
+    fn print_debug() {
+        let event = NewEvent {
+            time: Default::default(),
+            span: None,
+            target: "target".to_string(),
+            priority: Level::INFO,
+            records: vec![
+                FieldValueOwned {
+                    name: "dbg".to_string(),
+                    value: ValueOwned::Debug("thing".to_string()),
+                },
+                FieldValueOwned {
+                    name: "str".to_string(),
+                    value: ValueOwned::String("thing".to_string()),
+                },
+            ],
+        };
+
+        assert_eq!(
+            event.to_line(false, &[]),
+            r#"1970-01-01T00:00:00Z  INFO target: dbg=thing str="thing""#
+        );
+    }
+
+    #[test]
+    fn log_levels_ident() {
+        for (priority, str) in [
+            (Level::ERROR, "ERROR"),
+            (Level::WARN, " WARN"),
+            (Level::INFO, " INFO"),
+            (Level::DEBUG, "DEBUG"),
+            (Level::TRACE, "TRACE"),
+        ] {
+            let event = NewEvent {
+                time: Default::default(),
+                span: None,
+                target: "target".to_string(),
+                priority,
+                records: Default::default(),
+            };
+
+            assert_eq!(
+                event.to_line(false, Default::default()),
+                format!("1970-01-01T00:00:00Z {str} target:")
+            )
+        }
+    }
+
+    #[test]
+    fn message_field_name_is_omitted() {
+        let event = NewEvent {
+            time: Default::default(),
+            span: None,
+            target: "target".to_string(),
+            priority: Level::INFO,
+            records: vec![FieldValueOwned {
+                name: "message".to_string(),
+                value: ValueOwned::Debug("a log".to_string()),
+            }],
+        };
+
+        assert_eq!(
+            event.to_line(false, Default::default()),
+            "1970-01-01T00:00:00Z  INFO target: a log"
+        )
+    }
+
+    #[test]
+    fn span_print() {
+        let event = NewEvent {
+            time: Default::default(),
+            span: None,
+            target: "target".to_string(),
+            priority: Level::INFO,
+            records: Default::default(),
+        };
+
+        let spans = [
+            SpanRecords {
+                parent: None,
+                name: "record".to_string(),
+                records: vec![
+                    FieldValueOwned {
+                        name: "message".to_string(),
+                        value: ValueOwned::String("a log".to_string()),
+                    },
+                    FieldValueOwned {
+                        name: "a".to_string(),
+                        value: ValueOwned::Debug("b".to_string()),
+                    },
+                ],
+            },
+            SpanRecords {
+                parent: None,
+                name: "second".to_string(),
+                records: Default::default(),
+            },
+        ];
+        let spans = spans.iter().map(Cow::Borrowed).collect::<Vec<_>>();
+
+        assert_eq!(
+            event.to_line(false, &spans),
+            r#"1970-01-01T00:00:00Z  INFO record{message="a log" a=b}:second{}: target:"#
+        );
+    }
 }

@@ -5,7 +5,7 @@ fn main() {
     if let Some(read) = std::env::args().nth(1) {
         storage::Load::new(File::open(read).unwrap())
             .forward_cached(&mut string_cache::StringUncache::new(
-                printer::Printer::new(std::io::stdout()),
+                printer::Printer::new(std::io::stdout(), true),
             ))
             .unwrap();
         return;

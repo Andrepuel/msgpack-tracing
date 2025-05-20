@@ -215,7 +215,7 @@ impl<'a> Value<'a, &'a str> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ValueOwned {
     Debug(String),
     String(String),
@@ -394,7 +394,7 @@ where
     }
 
     fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
-        self.record_str(field, &value.to_string())
+        self.record_debug(field, &value.to_string())
     }
 }
 
