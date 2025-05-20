@@ -13,7 +13,10 @@ use tracing_subscriber::{
     EnvFilter, Layer, Registry, layer::SubscriberExt, registry::LookupSpan, util::SubscriberInitExt,
 };
 
-pub fn install<T: TapeMachine>(machine: T) {
+pub fn install<T>(machine: T)
+where
+    T: TapeMachine<InstructionRef>,
+{
     let filter = std::env::var("RUST_LOG").unwrap_or("warn".to_string());
 
     match Registry::default()
@@ -29,23 +32,34 @@ pub fn install<T: TapeMachine>(machine: T) {
     }
 }
 
-pub trait TapeMachine: Send + 'static {
+pub trait TapeMachine<I>: Send + 'static
+where
+    I: InstructionRefTrait,
+{
     fn needs_restart(&mut self) -> bool;
-    fn handle(&mut self, instruction: Instruction);
+    fn handle(&mut self, instruction: I::Instruction<'_>);
 }
 
-pub trait InstructionRef {
+pub trait InstructionRefTrait {
     type Instruction<'a>;
+}
+pub struct InstructionRef;
+impl InstructionRefTrait for InstructionRef {
+    type Instruction<'a> = Instruction<'a, &'a str>;
+}
+pub struct InstructionCachedRef;
+impl InstructionRefTrait for InstructionCachedRef {
+    type Instruction<'a> = Instruction<'a, CacheString<'a>>;
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Instruction<'a> {
+pub enum Instruction<'a, S> {
     Restart,
     NewString(&'a str),
     NewSpan {
         parent: Option<NonZeroU64>,
         span: NonZeroU64,
-        name: CacheString<'a>,
+        name: S,
     },
     FinishedSpan,
     NewRecord(NonZeroU64),
@@ -53,14 +67,14 @@ pub enum Instruction<'a> {
     StartEvent {
         time: DateTime<Utc>,
         span: Option<NonZeroU64>,
-        target: CacheString<'a>,
+        target: S,
         priority: Level,
     },
     FinishedEvent,
-    AddValue(FieldValue<'a>),
+    AddValue(FieldValue<'a, S>),
     DeleteSpan(NonZeroU64),
 }
-impl Instruction<'_> {
+impl<S> Instruction<'_, S> {
     pub fn id(self) -> InstructionId {
         match self {
             Instruction::Restart => InstructionId::Restart,
@@ -127,11 +141,11 @@ impl TryFrom<u8> for InstructionId {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct FieldValue<'a> {
-    pub name: CacheString<'a>,
-    pub value: Value<'a>,
+pub struct FieldValue<'a, S> {
+    pub name: S,
+    pub value: Value<'a, S>,
 }
-impl FieldValue<'_> {
+impl<'a> FieldValue<'a, &'a str> {
     pub fn to_owned(self) -> FieldValueOwned {
         FieldValueOwned {
             name: self.name.to_owned(),
@@ -142,73 +156,68 @@ impl FieldValue<'_> {
 
 #[derive(Clone)]
 pub struct FieldValueOwned {
-    pub name: CacheStringOwned,
+    pub name: String,
     pub value: ValueOwned,
 }
 impl FieldValueOwned {
-    pub fn as_ref(&self) -> FieldValue {
+    pub fn as_ref(&self) -> FieldValue<&str> {
         FieldValue {
-            name: self.name.as_ref(),
+            name: &self.name,
             value: self.value.as_ref(),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Value<'a> {
-    String(CacheString<'a>),
+pub enum Value<'a, S> {
+    String(S),
     Float(f64),
     Integer(i64),
     Unsigned(u64),
     Bool(bool),
     ByteArray(&'a [u8]),
 }
-impl Value<'_> {
-    pub fn to_owned(self) -> ValueOwned {
-        match self {
-            Value::String(cache_string) => ValueOwned::String(cache_string.to_owned()),
-            Value::Float(value) => ValueOwned::Float(value),
-            Value::Integer(value) => ValueOwned::Integer(value),
-            Value::Unsigned(value) => ValueOwned::Unsigned(value),
-            Value::Bool(value) => ValueOwned::Bool(value),
-            Value::ByteArray(value) => ValueOwned::ByteArray(value.to_owned()),
-        }
-    }
-}
-impl<'a> From<CacheString<'a>> for Value<'a> {
-    fn from(value: CacheString<'a>) -> Self {
-        Self::String(value)
-    }
-}
-impl From<f64> for Value<'_> {
+impl<S> From<f64> for Value<'_, S> {
     fn from(value: f64) -> Self {
         Value::Float(value)
     }
 }
-impl From<i64> for Value<'_> {
+impl<S> From<i64> for Value<'_, S> {
     fn from(value: i64) -> Self {
         Self::Integer(value)
     }
 }
-impl From<u64> for Value<'_> {
+impl<S> From<u64> for Value<'_, S> {
     fn from(value: u64) -> Self {
         Self::Unsigned(value)
     }
 }
-impl From<bool> for Value<'_> {
+impl<S> From<bool> for Value<'_, S> {
     fn from(value: bool) -> Self {
         Value::Bool(value)
     }
 }
-impl<'a> From<&'a [u8]> for Value<'a> {
+impl<'a, S> From<&'a [u8]> for Value<'a, S> {
     fn from(value: &'a [u8]) -> Self {
         Value::ByteArray(value)
+    }
+}
+impl<'a> Value<'a, &'a str> {
+    fn to_owned(self) -> ValueOwned {
+        match self {
+            Value::String(str) => ValueOwned::String(str.to_owned()),
+            Value::Float(value) => ValueOwned::Float(value),
+            Value::Integer(value) => ValueOwned::Integer(value),
+            Value::Unsigned(value) => ValueOwned::Unsigned(value),
+            Value::Bool(value) => ValueOwned::Bool(value),
+            Value::ByteArray(items) => ValueOwned::ByteArray(items.to_owned()),
+        }
     }
 }
 
 #[derive(Clone)]
 pub enum ValueOwned {
-    String(CacheStringOwned),
+    String(String),
     Float(f64),
     Integer(i64),
     Unsigned(u64),
@@ -216,13 +225,13 @@ pub enum ValueOwned {
     ByteArray(Vec<u8>),
 }
 impl ValueOwned {
-    pub fn as_ref(&self) -> Value {
+    pub fn as_ref(&self) -> Value<&str> {
         match self {
-            ValueOwned::String(string) => Value::String(string.as_ref()),
-            ValueOwned::Float(data) => Value::Float(*data),
-            ValueOwned::Integer(data) => Value::Integer(*data),
-            ValueOwned::Unsigned(data) => Value::Unsigned(*data),
-            ValueOwned::Bool(data) => Value::Bool(*data),
+            ValueOwned::String(value) => Value::String(value),
+            ValueOwned::Float(value) => Value::Float(*value),
+            ValueOwned::Integer(value) => Value::Integer(*value),
+            ValueOwned::Unsigned(value) => Value::Unsigned(*value),
+            ValueOwned::Bool(value) => Value::Bool(*value),
             ValueOwned::ByteArray(items) => Value::ByteArray(items),
         }
     }
@@ -233,42 +242,13 @@ pub enum CacheString<'a> {
     Present(&'a str),
     Cached(u64),
 }
-impl CacheString<'_> {
-    pub fn to_owned(self) -> CacheStringOwned {
-        match self {
-            CacheString::Present(value) => CacheStringOwned::Present(value.to_owned()),
-            CacheString::Cached(value) => CacheStringOwned::Cached(value),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub enum CacheStringOwned {
-    Present(String),
-    Cached(u64),
-}
-impl CacheStringOwned {
-    pub fn read<'a>(&'a self, strings: &'a [String]) -> &'a str {
-        match self {
-            CacheStringOwned::Present(str) => str,
-            CacheStringOwned::Cached(index) => strings[*index as usize].as_str(),
-        }
-    }
-
-    pub fn as_ref(&self) -> CacheString<'_> {
-        match self {
-            CacheStringOwned::Present(small) => CacheString::Present(small.as_str()),
-            CacheStringOwned::Cached(index) => CacheString::Cached(*index),
-        }
-    }
-}
 
 pub struct TapeMachineLogger<T> {
     inner: Mutex<TapeMachineLoggerInner<T>>,
 }
 impl<T> TapeMachineLogger<T>
 where
-    T: TapeMachine,
+    T: TapeMachine<InstructionRef>,
 {
     pub fn new(mut machine: T) -> Self {
         machine.handle(Instruction::Restart);
@@ -287,7 +267,7 @@ where
 }
 impl<T, S> Layer<S> for TapeMachineLogger<T>
 where
-    T: TapeMachine,
+    T: TapeMachine<InstructionRef>,
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_new_span(
@@ -297,7 +277,7 @@ where
         ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
         let mut machine = self.machine();
-        let name = CacheString::Present(attrs.metadata().name());
+        let name = attrs.metadata().name();
         let span = ctx.span(id).unwrap();
         machine.handle(Instruction::NewSpan {
             parent: span.parent().map(|parent| parent.id().into_non_zero_u64()),
@@ -328,7 +308,7 @@ where
             .event_span(event)
             .map(|span| span.id().into_non_zero_u64());
         let priority = *event.metadata().level();
-        let target = CacheString::Present(event.metadata().target());
+        let target = event.metadata().target();
         machine.handle(Instruction::StartEvent {
             time,
             span,
@@ -351,19 +331,19 @@ struct TapeMachineLoggerInner<T> {
 }
 impl<T> TapeMachineLoggerInner<T>
 where
-    T: TapeMachine,
+    T: TapeMachine<InstructionRef>,
 {
-    fn field_value<'a, V>(&mut self, field: &Field, value: V) -> FieldValue<'a>
+    fn field_value<'a, V>(&mut self, field: &Field, value: V) -> FieldValue<'a, &'a str>
     where
-        V: Into<Value<'a>>,
+        V: Into<Value<'a, &'a str>>,
     {
-        let name = CacheString::Present(field.name());
+        let name = field.name();
         let value = value.into();
 
         FieldValue { name, value }
     }
 
-    fn handle(&mut self, instruction: Instruction) {
+    fn handle(&mut self, instruction: Instruction<&str>) {
         self.machine.handle(instruction);
     }
 }
@@ -371,7 +351,7 @@ where
 struct VisitMachine<'a, T>(&'a mut TapeMachineLoggerInner<T>);
 impl<T> Visit for VisitMachine<'_, T>
 where
-    T: TapeMachine,
+    T: TapeMachine<InstructionRef>,
 {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         self.record_str(field, &format!("{value:?}"));
@@ -406,8 +386,7 @@ where
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
-        let value = CacheString::Present(value);
-        let value = self.0.field_value(field, value);
+        let value = self.0.field_value(field, Value::String(value));
         self.0.handle(Instruction::AddValue(value));
     }
 
@@ -424,14 +403,14 @@ where
 #[derive(Clone)]
 pub struct SpanRecords {
     pub parent: Option<NonZeroU64>,
-    pub name: CacheStringOwned,
+    pub name: String,
     pub records: Vec<FieldValueOwned>,
 }
 impl SpanRecords {
     pub fn lost(span: NonZeroU64) -> Self {
         Self {
             parent: None,
-            name: CacheStringOwned::Present(format!("span-{span}")),
+            name: format!("span-{span}"),
             records: Default::default(),
         }
     }

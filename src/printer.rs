@@ -1,5 +1,5 @@
 use crate::tape::{
-    CacheStringOwned, FieldValueOwned, Instruction, SpanRecords, TapeMachine, ValueOwned,
+    FieldValueOwned, Instruction, InstructionRef, SpanRecords, TapeMachine, ValueOwned,
 };
 use chrono::{DateTime, Utc};
 use nu_ansi_term::{Color, Style};
@@ -28,13 +28,6 @@ where
         }
     }
 
-    fn get_str<'a>(&'a self, str: &'a CacheStringOwned) -> &'a str {
-        match str {
-            CacheStringOwned::Present(small) => small.as_str(),
-            CacheStringOwned::Cached(_) => panic!("Cache not expected"),
-        }
-    }
-
     fn get_span(&self, span: NonZeroU64) -> Cow<SpanRecords> {
         match self.span.get(&span) {
             Some(span) => Cow::Borrowed(span),
@@ -54,7 +47,7 @@ where
         O: Write,
     {
         match value {
-            ValueOwned::String(str) => write!(out, "{:?}", self.get_str(str)),
+            ValueOwned::String(str) => write!(out, "{str:?}"),
             ValueOwned::Float(value) => write!(out, "{value}"),
             ValueOwned::Integer(value) => write!(out, "{value}"),
             ValueOwned::Unsigned(value) => write!(out, "{value}"),
@@ -98,11 +91,11 @@ where
     where
         O: Write,
     {
-        let name = self.get_str(&record.name);
+        let name = &record.name;
 
         if name == "message" && with_message {
             if let ValueOwned::String(str) = &record.value {
-                return write!(out, "{}", self.get_str(str));
+                return write!(out, "{}", str);
             }
         }
 
@@ -111,7 +104,7 @@ where
         self.write_value(&record.value, out)
     }
 }
-impl<W> TapeMachine for Printer<W>
+impl<W> TapeMachine<InstructionRef> for Printer<W>
 where
     W: io::Write + Send + 'static,
 {
@@ -119,7 +112,7 @@ where
         false
     }
 
-    fn handle(&mut self, instruction: Instruction) {
+    fn handle(&mut self, instruction: Instruction<&str>) {
         match instruction {
             Instruction::Restart => {}
             Instruction::NewString(_) => {}
@@ -179,7 +172,7 @@ where
 
                 if let Some(span) = new_event.span {
                     self.span_iter(span, &mut |span| {
-                        let name = self.get_str(&span.name);
+                        let name = &span.name;
 
                         write!(line, "{}{name}{{{}", bold.prefix(), bold.suffix()).unwrap();
                         for (idx, record) in span.records.iter().enumerate() {
@@ -197,7 +190,7 @@ where
                     line,
                     " {}{}:{}",
                     dimmed.prefix(),
-                    self.get_str(&new_event.target),
+                    new_event.target,
                     dimmed.suffix()
                 )
                 .unwrap();
@@ -232,7 +225,7 @@ where
 pub struct NewEvent {
     time: DateTime<Utc>,
     span: Option<NonZeroU64>,
-    target: CacheStringOwned,
+    target: String,
     priority: Level,
     records: Vec<FieldValueOwned>,
 }

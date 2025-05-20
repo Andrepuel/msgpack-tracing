@@ -1,4 +1,6 @@
-use crate::tape::{CacheString, FieldValue, Instruction, InstructionId, TapeMachine, Value};
+use crate::tape::{
+    CacheString, FieldValue, Instruction, InstructionCachedRef, InstructionId, TapeMachine, Value,
+};
 use chrono::DateTime;
 use rmp::{Marker, decode, encode};
 use std::{
@@ -16,7 +18,7 @@ where
         Self(out)
     }
 
-    pub fn do_handle(write: &mut W, instruction: Instruction) -> io::Result<()> {
+    pub fn do_handle(write: &mut W, instruction: Instruction<CacheString>) -> io::Result<()> {
         write.write_all(&[instruction.id().into()])?;
         match instruction {
             Instruction::Restart => (),
@@ -76,7 +78,7 @@ where
         Ok(())
     }
 
-    fn write_cache_value(write: &mut W, value: Value) -> io::Result<()> {
+    fn write_cache_value(write: &mut W, value: Value<CacheString>) -> io::Result<()> {
         match value {
             Value::String(str) => Self::write_cache_str(write, str)?,
             Value::Float(data) => encode::write_f64(write, data)?,
@@ -93,7 +95,7 @@ where
         Ok(())
     }
 }
-impl<W> TapeMachine for Store<W>
+impl<W> TapeMachine<InstructionCachedRef> for Store<W>
 where
     W: io::Write + Send + 'static,
 {
@@ -101,7 +103,7 @@ where
         false
     }
 
-    fn handle(&mut self, instruction: Instruction) {
+    fn handle(&mut self, instruction: Instruction<CacheString>) {
         if let Err(e) = Self::do_handle(&mut self.0, instruction) {
             panic!("{e}")
         }
@@ -127,7 +129,10 @@ where
         }
     }
 
-    pub fn forward<T: TapeMachine>(&mut self, machine: &mut T) -> io::Result<()> {
+    pub fn forward<T>(&mut self, machine: &mut T) -> io::Result<()>
+    where
+        T: TapeMachine<InstructionCachedRef>,
+    {
         while let Some(instruction) = self.fetch_one()? {
             machine.handle(instruction);
         }
@@ -135,7 +140,7 @@ where
         Ok(())
     }
 
-    pub fn fetch_one(&mut self) -> io::Result<Option<Instruction>> {
+    pub fn fetch_one(&mut self) -> io::Result<Option<Instruction<CacheString>>> {
         let instruction = loop {
             let Some(instruction) = self.read.fill_buf()?.first().copied() else {
                 return Ok(None);
@@ -216,7 +221,10 @@ where
         std::str::from_utf8(buf.as_slice()).map_err(decode_err)
     }
 
-    fn do_read_value<'a>(read: &mut BufReader<R>, buf: &'a mut Vec<u8>) -> io::Result<Value<'a>> {
+    fn do_read_value<'a>(
+        read: &mut BufReader<R>,
+        buf: &'a mut Vec<u8>,
+    ) -> io::Result<Value<'a, CacheString<'a>>> {
         Ok(match Self::do_peek_marker(read)? {
             Marker::FixPos(_)
             | Marker::FixNeg(_)

@@ -1,6 +1,6 @@
 use crate::{
     storage::Store,
-    tape::{Instruction, TapeMachine},
+    tape::{CacheString, Instruction, InstructionCachedRef, TapeMachine},
 };
 use std::{
     fs::File,
@@ -56,12 +56,12 @@ impl Rotate {
         Ok(true)
     }
 }
-impl TapeMachine for Rotate {
+impl TapeMachine<InstructionCachedRef> for Rotate {
     fn needs_restart(&mut self) -> bool {
         self.do_needs_restart().unwrap_or_default()
     }
 
-    fn handle(&mut self, instruction: Instruction) {
+    fn handle(&mut self, instruction: Instruction<CacheString>) {
         let Ok(file) = self.file_mut() else {
             return;
         };

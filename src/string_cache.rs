@@ -1,4 +1,7 @@
-use crate::tape::{CacheString, FieldValue, Instruction, SpanRecords, TapeMachine, Value};
+use crate::tape::{
+    CacheString, FieldValue, Instruction, InstructionCachedRef, InstructionRef, SpanRecords,
+    TapeMachine, Value,
+};
 use std::{collections::HashMap, num::NonZeroU64};
 
 pub struct StringCache<T> {
@@ -7,7 +10,7 @@ pub struct StringCache<T> {
 }
 impl<T> StringCache<T>
 where
-    T: TapeMachine,
+    T: TapeMachine<InstructionCachedRef>,
 {
     pub fn new(forward: T) -> Self {
         Self {
@@ -16,17 +19,14 @@ where
         }
     }
 
-    fn cache_cache_string<'a>(&mut self, string: CacheString<'a>) -> CacheString<'a> {
-        match string {
-            CacheString::Present(small) => self.cache_string(small),
-            cached @ CacheString::Cached(_) => cached,
-        }
-    }
-
-    fn cache_value<'a>(&mut self, value: Value<'a>) -> Value<'a> {
+    fn cache_value<'a>(&mut self, value: Value<'a, &'a str>) -> Value<'a, CacheString<'a>> {
         match value {
-            Value::String(string) => Value::String(self.cache_cache_string(string)),
-            value => value,
+            Value::String(string) => Value::String(self.cache_string(string)),
+            Value::Float(value) => Value::Float(value),
+            Value::Integer(value) => Value::Integer(value),
+            Value::Unsigned(value) => Value::Unsigned(value),
+            Value::Bool(value) => Value::Bool(value),
+            Value::ByteArray(value) => Value::ByteArray(value),
         }
     }
 
@@ -53,15 +53,15 @@ where
         }
     }
 }
-impl<T> TapeMachine for StringCache<T>
+impl<T> TapeMachine<InstructionRef> for StringCache<T>
 where
-    T: TapeMachine,
+    T: TapeMachine<InstructionCachedRef>,
 {
     fn needs_restart(&mut self) -> bool {
         self.forward.needs_restart()
     }
 
-    fn handle(&mut self, instruction: Instruction) {
+    fn handle(&mut self, instruction: Instruction<&str>) {
         match instruction {
             Instruction::Restart => {
                 self.strings.clear();
@@ -73,7 +73,7 @@ where
                 self.forward.handle(Instruction::NewString(str));
             }
             Instruction::NewSpan { parent, span, name } => {
-                let name = self.cache_cache_string(name);
+                let name = self.cache_string(name);
                 self.forward
                     .handle(Instruction::NewSpan { parent, span, name });
             }
@@ -92,7 +92,7 @@ where
                 target,
                 priority,
             } => {
-                let target = self.cache_cache_string(target);
+                let target = self.cache_string(target);
                 self.forward.handle(Instruction::StartEvent {
                     time,
                     span,
@@ -104,7 +104,7 @@ where
                 self.forward.handle(Instruction::FinishedEvent);
             }
             Instruction::AddValue(FieldValue { name, value }) => {
-                let name = self.cache_cache_string(name);
+                let name = self.cache_string(name);
                 let value = self.cache_value(value);
                 self.forward
                     .handle(Instruction::AddValue(FieldValue { name, value }));
@@ -123,7 +123,7 @@ pub struct RestartableMachine<T> {
 }
 impl<T> RestartableMachine<T>
 where
-    T: TapeMachine,
+    T: TapeMachine<InstructionRef>,
 {
     pub fn new(forward: T) -> Self {
         Self {
@@ -133,15 +133,15 @@ where
         }
     }
 }
-impl<T> TapeMachine for RestartableMachine<T>
+impl<T> TapeMachine<InstructionRef> for RestartableMachine<T>
 where
-    T: TapeMachine,
+    T: TapeMachine<InstructionRef>,
 {
     fn needs_restart(&mut self) -> bool {
         self.forward.needs_restart()
     }
 
-    fn handle(&mut self, instruction: Instruction) {
+    fn handle(&mut self, instruction: Instruction<&str>) {
         match instruction {
             Instruction::Restart => {
                 self.forward.handle(Instruction::Restart);
@@ -226,7 +226,7 @@ pub struct StringUncache<T> {
 }
 impl<T> StringUncache<T>
 where
-    T: TapeMachine,
+    T: TapeMachine<InstructionRef>,
 {
     pub fn new(forward: T) -> Self {
         Self {
@@ -235,29 +235,36 @@ where
         }
     }
 
-    fn uncache<'a>(strings: &'a [String], string: CacheString<'a>) -> CacheString<'a> {
+    fn uncache<'a>(strings: &'a [String], string: CacheString<'a>) -> &'a str {
         match string {
-            CacheString::Present(str) => CacheString::Present(str),
-            CacheString::Cached(index) => CacheString::Present(strings[index as usize].as_str()),
+            CacheString::Present(str) => str,
+            CacheString::Cached(index) => strings[index as usize].as_str(),
         }
     }
 
-    fn uncache_value<'a>(strings: &'a [String], value: Value<'a>) -> Value<'a> {
+    fn uncache_value<'a>(
+        strings: &'a [String],
+        value: Value<'a, CacheString<'a>>,
+    ) -> Value<'a, &'a str> {
         match value {
             Value::String(string) => Value::String(Self::uncache(strings, string)),
-            value => value,
+            Value::Float(value) => Value::Float(value),
+            Value::Integer(value) => Value::Integer(value),
+            Value::Unsigned(value) => Value::Unsigned(value),
+            Value::Bool(value) => Value::Bool(value),
+            Value::ByteArray(items) => Value::ByteArray(items),
         }
     }
 }
-impl<T> TapeMachine for StringUncache<T>
+impl<T> TapeMachine<InstructionCachedRef> for StringUncache<T>
 where
-    T: TapeMachine,
+    T: TapeMachine<InstructionRef>,
 {
     fn needs_restart(&mut self) -> bool {
         self.forward.needs_restart()
     }
 
-    fn handle(&mut self, instruction: Instruction) {
+    fn handle(&mut self, instruction: Instruction<CacheString>) {
         match instruction {
             Instruction::Restart => {
                 self.forward.handle(Instruction::Restart);
