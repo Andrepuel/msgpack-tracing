@@ -73,7 +73,10 @@ where
 
     fn handle(&mut self, instruction: Instruction) {
         match instruction {
-            Instruction::Restart => {}
+            Instruction::Restart => {
+                self.new_event = None;
+                self.new_records = None;
+            }
             Instruction::NewSpan { parent, span, name } => {
                 assert!(self.new_records.is_none());
                 self.new_records = Some((

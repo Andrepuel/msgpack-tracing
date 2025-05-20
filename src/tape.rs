@@ -9,28 +9,7 @@ use tracing::{
     field::{Field, Visit},
     span,
 };
-use tracing_subscriber::{
-    EnvFilter, Layer, Registry, layer::SubscriberExt, registry::LookupSpan, util::SubscriberInitExt,
-};
-
-pub fn install<T>(machine: T)
-where
-    T: TapeMachine<InstructionSet>,
-{
-    let filter = std::env::var("RUST_LOG").unwrap_or("warn".to_string());
-
-    match Registry::default()
-        .with(EnvFilter::from(&filter))
-        .with(TapeMachineLogger::new(machine))
-        .try_init()
-    {
-        Ok(()) => tracing::debug!(?filter, "Logger initialized"),
-        Err(e) => {
-            tracing::warn!(%e, "Trying to initialize logger twice");
-            tracing::debug!(?e);
-        }
-    }
-}
+use tracing_subscriber::{Layer, registry::LookupSpan};
 
 pub trait TapeMachine<I>: Send + 'static
 where
@@ -89,7 +68,7 @@ impl InstructionTrait for Instruction<'_> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum InstructionId {
     Restart,
     NewString,

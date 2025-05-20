@@ -112,6 +112,7 @@ where
                 encode::write_uint(write, span)?;
             }
         }
+        write.flush()?;
 
         Ok(())
     }
@@ -190,6 +191,10 @@ where
             buf2: Default::default(),
             started: false,
         }
+    }
+
+    pub fn restart(&mut self) {
+        self.started = false;
     }
 
     pub fn forward<T>(&mut self, machine: &mut T) -> io::Result<()>
@@ -288,6 +293,7 @@ where
 
             if instruction == u8::from(InstructionId::Restart) {
                 self.started = true;
+                break instruction;
             }
         };
 

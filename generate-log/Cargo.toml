@@ -1,0 +1,8 @@
+[package]
+name = "generate-log"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+msgpack-tracing = { path = ".." }
+tracing = "0.1.41"

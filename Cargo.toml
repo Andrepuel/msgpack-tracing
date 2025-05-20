@@ -3,10 +3,21 @@ name = "msgpack-tracing"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["env-filter"]
+printer = ["nu-ansi-term"]
+env-filter = ["tracing-subscriber/env-filter"]
+
 [dependencies]
 chrono = "0.4.41"
-nu-ansi-term = "0.50.1"
+nu-ansi-term = { version = "0.50.1", optional = true }
 rmp = "0.8.14"
 thiserror = "2.0.12"
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.19", features = [] }
+
+[workspace]
+members = [
+    "generate-log",
+    "msgpack-tracing-printer"
+]

@@ -1,0 +1,8 @@
+[package]
+name = "msgpack-tracing-printer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+atty = "0.2.14"
+msgpack-tracing = { path = "../", features = ["printer"] }
