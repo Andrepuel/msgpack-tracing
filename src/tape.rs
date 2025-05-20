@@ -15,7 +15,7 @@ use tracing_subscriber::{
 
 pub fn install<T>(machine: T)
 where
-    T: TapeMachine<InstructionRef>,
+    T: TapeMachine<InstructionSet>,
 {
     let filter = std::env::var("RUST_LOG").unwrap_or("warn".to_string());
 
@@ -34,32 +34,31 @@ where
 
 pub trait TapeMachine<I>: Send + 'static
 where
-    I: InstructionRefTrait,
+    I: InstructionSetTrait,
 {
     fn needs_restart(&mut self) -> bool;
     fn handle(&mut self, instruction: I::Instruction<'_>);
 }
 
-pub trait InstructionRefTrait {
-    type Instruction<'a>;
+pub trait InstructionSetTrait {
+    type Instruction<'a>: InstructionTrait;
 }
-pub struct InstructionRef;
-impl InstructionRefTrait for InstructionRef {
-    type Instruction<'a> = Instruction<'a, &'a str>;
+pub struct InstructionSet;
+impl InstructionSetTrait for InstructionSet {
+    type Instruction<'a> = Instruction<'a>;
 }
-pub struct InstructionCachedRef;
-impl InstructionRefTrait for InstructionCachedRef {
-    type Instruction<'a> = Instruction<'a, CacheString<'a>>;
+
+pub trait InstructionTrait: Copy {
+    fn id(self) -> InstructionId;
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Instruction<'a, S> {
+pub enum Instruction<'a> {
     Restart,
-    NewString(&'a str),
     NewSpan {
         parent: Option<NonZeroU64>,
         span: NonZeroU64,
-        name: S,
+        name: &'a str,
     },
     FinishedSpan,
     NewRecord(NonZeroU64),
@@ -67,18 +66,17 @@ pub enum Instruction<'a, S> {
     StartEvent {
         time: DateTime<Utc>,
         span: Option<NonZeroU64>,
-        target: S,
+        target: &'a str,
         priority: Level,
     },
     FinishedEvent,
-    AddValue(FieldValue<'a, S>),
+    AddValue(FieldValue<'a, &'a str>),
     DeleteSpan(NonZeroU64),
 }
-impl<S> Instruction<'_, S> {
-    pub fn id(self) -> InstructionId {
+impl InstructionTrait for Instruction<'_> {
+    fn id(self) -> InstructionId {
         match self {
             Instruction::Restart => InstructionId::Restart,
-            Instruction::NewString(..) => InstructionId::NewString,
             Instruction::NewSpan { .. } => InstructionId::NewSpan,
             Instruction::FinishedSpan => InstructionId::FinishedSpan,
             Instruction::NewRecord(..) => InstructionId::NewRecord,
@@ -237,18 +235,12 @@ impl ValueOwned {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum CacheString<'a> {
-    Present(&'a str),
-    Cached(u64),
-}
-
 pub struct TapeMachineLogger<T> {
     inner: Mutex<TapeMachineLoggerInner<T>>,
 }
 impl<T> TapeMachineLogger<T>
 where
-    T: TapeMachine<InstructionRef>,
+    T: TapeMachine<InstructionSet>,
 {
     pub fn new(mut machine: T) -> Self {
         machine.handle(Instruction::Restart);
@@ -267,7 +259,7 @@ where
 }
 impl<T, S> Layer<S> for TapeMachineLogger<T>
 where
-    T: TapeMachine<InstructionRef>,
+    T: TapeMachine<InstructionSet>,
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_new_span(
@@ -331,7 +323,7 @@ struct TapeMachineLoggerInner<T> {
 }
 impl<T> TapeMachineLoggerInner<T>
 where
-    T: TapeMachine<InstructionRef>,
+    T: TapeMachine<InstructionSet>,
 {
     fn field_value<'a, V>(&mut self, field: &Field, value: V) -> FieldValue<'a, &'a str>
     where
@@ -343,7 +335,7 @@ where
         FieldValue { name, value }
     }
 
-    fn handle(&mut self, instruction: Instruction<&str>) {
+    fn handle(&mut self, instruction: Instruction) {
         self.machine.handle(instruction);
     }
 }
@@ -351,7 +343,7 @@ where
 struct VisitMachine<'a, T>(&'a mut TapeMachineLoggerInner<T>);
 impl<T> Visit for VisitMachine<'_, T>
 where
-    T: TapeMachine<InstructionRef>,
+    T: TapeMachine<InstructionSet>,
 {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         self.record_str(field, &format!("{value:?}"));

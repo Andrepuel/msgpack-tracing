@@ -1,5 +1,5 @@
 use crate::tape::{
-    FieldValueOwned, Instruction, InstructionRef, SpanRecords, TapeMachine, ValueOwned,
+    FieldValueOwned, Instruction, InstructionSet, SpanRecords, TapeMachine, ValueOwned,
 };
 use chrono::{DateTime, Utc};
 use nu_ansi_term::{Color, Style};
@@ -104,7 +104,7 @@ where
         self.write_value(&record.value, out)
     }
 }
-impl<W> TapeMachine<InstructionRef> for Printer<W>
+impl<W> TapeMachine<InstructionSet> for Printer<W>
 where
     W: io::Write + Send + 'static,
 {
@@ -112,10 +112,9 @@ where
         false
     }
 
-    fn handle(&mut self, instruction: Instruction<&str>) {
+    fn handle(&mut self, instruction: Instruction) {
         match instruction {
             Instruction::Restart => {}
-            Instruction::NewString(_) => {}
             Instruction::NewSpan { parent, span, name } => {
                 assert!(self.new_records.is_none());
                 self.new_records = Some((

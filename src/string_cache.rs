@@ -1,8 +1,60 @@
 use crate::tape::{
-    CacheString, FieldValue, Instruction, InstructionCachedRef, InstructionRef, SpanRecords,
+    FieldValue, Instruction, InstructionId, InstructionSet, InstructionSetTrait, InstructionTrait,
     TapeMachine, Value,
 };
+use chrono::{DateTime, Utc};
 use std::{collections::HashMap, num::NonZeroU64};
+use tracing::Level;
+
+#[derive(Clone, Copy, Debug)]
+pub enum CacheInstruction<'a> {
+    Restart,
+    NewString(&'a str),
+    NewSpan {
+        parent: Option<NonZeroU64>,
+        span: NonZeroU64,
+        name: CacheString<'a>,
+    },
+    FinishedSpan,
+    NewRecord(NonZeroU64),
+    FinishedRecord,
+    StartEvent {
+        time: DateTime<Utc>,
+        span: Option<NonZeroU64>,
+        target: CacheString<'a>,
+        priority: Level,
+    },
+    FinishedEvent,
+    AddValue(FieldValue<'a, CacheString<'a>>),
+    DeleteSpan(NonZeroU64),
+}
+impl InstructionTrait for CacheInstruction<'_> {
+    fn id(self) -> InstructionId {
+        match self {
+            CacheInstruction::Restart => InstructionId::Restart,
+            CacheInstruction::NewString(..) => InstructionId::NewString,
+            CacheInstruction::NewSpan { .. } => InstructionId::NewSpan,
+            CacheInstruction::FinishedSpan => InstructionId::FinishedSpan,
+            CacheInstruction::NewRecord(..) => InstructionId::NewRecord,
+            CacheInstruction::FinishedRecord => InstructionId::FinishedRecord,
+            CacheInstruction::StartEvent { .. } => InstructionId::StartEvent,
+            CacheInstruction::FinishedEvent => InstructionId::FinishedEvent,
+            CacheInstruction::AddValue(..) => InstructionId::AddValue,
+            CacheInstruction::DeleteSpan(..) => InstructionId::DeleteSpan,
+        }
+    }
+}
+
+pub struct CacheInstructionSet;
+impl InstructionSetTrait for CacheInstructionSet {
+    type Instruction<'a> = CacheInstruction<'a>;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum CacheString<'a> {
+    Present(&'a str),
+    Cached(u64),
+}
 
 pub struct StringCache<T> {
     forward: T,
@@ -10,7 +62,7 @@ pub struct StringCache<T> {
 }
 impl<T> StringCache<T>
 where
-    T: TapeMachine<InstructionCachedRef>,
+    T: TapeMachine<CacheInstructionSet>,
 {
     pub fn new(forward: T) -> Self {
         Self {
@@ -47,44 +99,39 @@ where
         if small {
             CacheString::Present(string)
         } else {
-            self.forward.handle(Instruction::NewString(string));
+            self.forward.handle(CacheInstruction::NewString(string));
             self.strings.insert(string.to_owned(), id);
             CacheString::Cached(id)
         }
     }
 }
-impl<T> TapeMachine<InstructionRef> for StringCache<T>
+impl<T> TapeMachine<InstructionSet> for StringCache<T>
 where
-    T: TapeMachine<InstructionCachedRef>,
+    T: TapeMachine<CacheInstructionSet>,
 {
     fn needs_restart(&mut self) -> bool {
         self.forward.needs_restart()
     }
 
-    fn handle(&mut self, instruction: Instruction<&str>) {
+    fn handle(&mut self, instruction: Instruction) {
         match instruction {
             Instruction::Restart => {
                 self.strings.clear();
-                self.forward.handle(Instruction::Restart);
-            }
-            Instruction::NewString(str) => {
-                let new_id = self.strings.len() as u64;
-                self.strings.insert(str.to_owned(), new_id);
-                self.forward.handle(Instruction::NewString(str));
+                self.forward.handle(CacheInstruction::Restart);
             }
             Instruction::NewSpan { parent, span, name } => {
                 let name = self.cache_string(name);
                 self.forward
-                    .handle(Instruction::NewSpan { parent, span, name });
+                    .handle(CacheInstruction::NewSpan { parent, span, name });
             }
             Instruction::FinishedSpan => {
-                self.forward.handle(Instruction::FinishedSpan);
+                self.forward.handle(CacheInstruction::FinishedSpan);
             }
             Instruction::NewRecord(span) => {
-                self.forward.handle(Instruction::NewRecord(span));
+                self.forward.handle(CacheInstruction::NewRecord(span));
             }
             Instruction::FinishedRecord => {
-                self.forward.handle(Instruction::FinishedRecord);
+                self.forward.handle(CacheInstruction::FinishedRecord);
             }
             Instruction::StartEvent {
                 time,
@@ -93,7 +140,7 @@ where
                 priority,
             } => {
                 let target = self.cache_string(target);
-                self.forward.handle(Instruction::StartEvent {
+                self.forward.handle(CacheInstruction::StartEvent {
                     time,
                     span,
                     target,
@@ -101,120 +148,16 @@ where
                 });
             }
             Instruction::FinishedEvent => {
-                self.forward.handle(Instruction::FinishedEvent);
+                self.forward.handle(CacheInstruction::FinishedEvent);
             }
             Instruction::AddValue(FieldValue { name, value }) => {
                 let name = self.cache_string(name);
                 let value = self.cache_value(value);
                 self.forward
-                    .handle(Instruction::AddValue(FieldValue { name, value }));
+                    .handle(CacheInstruction::AddValue(FieldValue { name, value }));
             }
             Instruction::DeleteSpan(span) => {
-                self.forward.handle(Instruction::DeleteSpan(span));
-            }
-        }
-    }
-}
-
-pub struct RestartableMachine<T> {
-    forward: T,
-    span: HashMap<NonZeroU64, SpanRecords>,
-    current_span: Option<(NonZeroU64, SpanRecords)>,
-}
-impl<T> RestartableMachine<T>
-where
-    T: TapeMachine<InstructionRef>,
-{
-    pub fn new(forward: T) -> Self {
-        Self {
-            forward,
-            span: Default::default(),
-            current_span: None,
-        }
-    }
-}
-impl<T> TapeMachine<InstructionRef> for RestartableMachine<T>
-where
-    T: TapeMachine<InstructionRef>,
-{
-    fn needs_restart(&mut self) -> bool {
-        self.forward.needs_restart()
-    }
-
-    fn handle(&mut self, instruction: Instruction<&str>) {
-        match instruction {
-            Instruction::Restart => {
-                self.forward.handle(Instruction::Restart);
-
-                for (span, records) in self.span.iter() {
-                    self.forward.handle(Instruction::NewSpan {
-                        parent: records.parent,
-                        span: *span,
-                        name: records.name.as_ref(),
-                    });
-
-                    for record in records.records.iter() {
-                        self.forward.handle(Instruction::AddValue(record.as_ref()));
-                    }
-
-                    self.forward.handle(Instruction::FinishedSpan);
-                }
-            }
-            Instruction::NewString(str) => {
-                self.forward.handle(Instruction::NewString(str));
-            }
-            Instruction::NewSpan { parent, span, name } => {
-                assert!(self.current_span.is_none());
-                self.current_span = Some((
-                    span,
-                    SpanRecords {
-                        parent,
-                        name: name.to_owned(),
-                        records: Default::default(),
-                    },
-                ));
-
-                self.forward
-                    .handle(Instruction::NewSpan { parent, span, name });
-            }
-            Instruction::FinishedSpan => {
-                let (k, v) = self.current_span.take().unwrap();
-                self.span.insert(k, v);
-                self.forward.handle(Instruction::FinishedSpan)
-            }
-            Instruction::NewRecord(span) => {
-                assert!(self.current_span.is_none());
-                self.current_span = Some(self.span.remove_entry(&span).unwrap());
-                self.forward.handle(Instruction::NewRecord(span));
-            }
-            Instruction::FinishedRecord => {
-                let (k, v) = self.current_span.take().unwrap();
-                self.span.insert(k, v);
-                self.forward.handle(Instruction::FinishedRecord)
-            }
-            Instruction::StartEvent {
-                time,
-                span,
-                target,
-                priority,
-            } => {
-                self.forward.handle(Instruction::StartEvent {
-                    time,
-                    span,
-                    target,
-                    priority,
-                });
-            }
-            Instruction::FinishedEvent => self.forward.handle(Instruction::FinishedEvent),
-            Instruction::AddValue(field_value) => {
-                if let Some((_, current_span)) = self.current_span.as_mut() {
-                    current_span.records.push(field_value.to_owned());
-                }
-                self.forward.handle(Instruction::AddValue(field_value));
-            }
-            Instruction::DeleteSpan(span) => {
-                self.span.remove(&span);
-                self.forward.handle(Instruction::DeleteSpan(span));
+                self.forward.handle(CacheInstruction::DeleteSpan(span));
             }
         }
     }
@@ -226,7 +169,7 @@ pub struct StringUncache<T> {
 }
 impl<T> StringUncache<T>
 where
-    T: TapeMachine<InstructionRef>,
+    T: TapeMachine<InstructionSet>,
 {
     pub fn new(forward: T) -> Self {
         Self {
@@ -256,37 +199,37 @@ where
         }
     }
 }
-impl<T> TapeMachine<InstructionCachedRef> for StringUncache<T>
+impl<T> TapeMachine<CacheInstructionSet> for StringUncache<T>
 where
-    T: TapeMachine<InstructionRef>,
+    T: TapeMachine<InstructionSet>,
 {
     fn needs_restart(&mut self) -> bool {
         self.forward.needs_restart()
     }
 
-    fn handle(&mut self, instruction: Instruction<CacheString>) {
+    fn handle(&mut self, instruction: CacheInstruction) {
         match instruction {
-            Instruction::Restart => {
+            CacheInstruction::Restart => {
                 self.forward.handle(Instruction::Restart);
             }
-            Instruction::NewString(str) => {
+            CacheInstruction::NewString(str) => {
                 self.strings.push(str.to_owned());
             }
-            Instruction::NewSpan { parent, span, name } => {
+            CacheInstruction::NewSpan { parent, span, name } => {
                 let name = Self::uncache(&self.strings, name);
                 self.forward
                     .handle(Instruction::NewSpan { parent, span, name });
             }
-            Instruction::FinishedSpan => {
+            CacheInstruction::FinishedSpan => {
                 self.forward.handle(Instruction::FinishedSpan);
             }
-            Instruction::NewRecord(span) => {
+            CacheInstruction::NewRecord(span) => {
                 self.forward.handle(Instruction::NewRecord(span));
             }
-            Instruction::FinishedRecord => {
+            CacheInstruction::FinishedRecord => {
                 self.forward.handle(Instruction::FinishedRecord);
             }
-            Instruction::StartEvent {
+            CacheInstruction::StartEvent {
                 time,
                 span,
                 target,
@@ -301,16 +244,16 @@ where
                     priority,
                 });
             }
-            Instruction::FinishedEvent => {
+            CacheInstruction::FinishedEvent => {
                 self.forward.handle(Instruction::FinishedEvent);
             }
-            Instruction::AddValue(FieldValue { name, value }) => {
+            CacheInstruction::AddValue(FieldValue { name, value }) => {
                 let name = Self::uncache(&self.strings, name);
                 let value = Self::uncache_value(&self.strings, value);
                 self.forward
                     .handle(Instruction::AddValue(FieldValue { name, value }));
             }
-            Instruction::DeleteSpan(span) => {
+            CacheInstruction::DeleteSpan(span) => {
                 self.forward.handle(Instruction::DeleteSpan(span));
             }
         }

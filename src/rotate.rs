@@ -1,6 +1,7 @@
 use crate::{
     storage::Store,
-    tape::{CacheString, Instruction, InstructionCachedRef, TapeMachine},
+    string_cache::{CacheInstruction, CacheInstructionSet},
+    tape::{Instruction, InstructionSet, TapeMachine},
 };
 use std::{
     fs::File,
@@ -56,12 +57,25 @@ impl Rotate {
         Ok(true)
     }
 }
-impl TapeMachine<InstructionCachedRef> for Rotate {
+impl TapeMachine<CacheInstructionSet> for Rotate {
     fn needs_restart(&mut self) -> bool {
         self.do_needs_restart().unwrap_or_default()
     }
 
-    fn handle(&mut self, instruction: Instruction<CacheString>) {
+    fn handle(&mut self, instruction: CacheInstruction) {
+        let Ok(file) = self.file_mut() else {
+            return;
+        };
+
+        let _ = Store::do_handle_cached(file, instruction);
+    }
+}
+impl TapeMachine<InstructionSet> for Rotate {
+    fn needs_restart(&mut self) -> bool {
+        self.do_needs_restart().unwrap_or_default()
+    }
+
+    fn handle(&mut self, instruction: Instruction) {
         let Ok(file) = self.file_mut() else {
             return;
         };

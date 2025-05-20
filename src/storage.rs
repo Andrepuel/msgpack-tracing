@@ -1,5 +1,9 @@
-use crate::tape::{
-    CacheString, FieldValue, Instruction, InstructionCachedRef, InstructionId, TapeMachine, Value,
+use crate::{
+    string_cache::{CacheInstruction, CacheInstructionSet, CacheString},
+    tape::{
+        FieldValue, Instruction, InstructionId, InstructionSet, InstructionTrait, TapeMachine,
+        Value,
+    },
 };
 use chrono::DateTime;
 use rmp::{Marker, decode, encode};
@@ -18,25 +22,69 @@ where
         Self(out)
     }
 
-    pub fn do_handle(write: &mut W, instruction: Instruction<CacheString>) -> io::Result<()> {
+    pub fn do_handle(write: &mut W, instruction: Instruction) -> io::Result<()> {
+        let instruction = match instruction {
+            Instruction::Restart => CacheInstruction::Restart,
+            Instruction::NewSpan { parent, span, name } => {
+                let name = CacheString::Present(name);
+                CacheInstruction::NewSpan { parent, span, name }
+            }
+            Instruction::FinishedSpan => CacheInstruction::FinishedSpan,
+            Instruction::NewRecord(span) => CacheInstruction::NewRecord(span),
+            Instruction::FinishedRecord => CacheInstruction::FinishedRecord,
+            Instruction::StartEvent {
+                time,
+                span,
+                target,
+                priority,
+            } => {
+                let target = CacheString::Present(target);
+                CacheInstruction::StartEvent {
+                    time,
+                    span,
+                    target,
+                    priority,
+                }
+            }
+            Instruction::FinishedEvent => CacheInstruction::FinishedEvent,
+            Instruction::AddValue(FieldValue { name, value }) => {
+                let name = CacheString::Present(name);
+                let value = match value {
+                    Value::String(str) => Value::String(CacheString::Present(str)),
+                    Value::Float(data) => Value::Float(data),
+                    Value::Integer(data) => Value::Integer(data),
+                    Value::Unsigned(data) => Value::Unsigned(data),
+                    Value::Bool(data) => Value::Bool(data),
+                    Value::ByteArray(items) => Value::ByteArray(items),
+                };
+
+                CacheInstruction::AddValue(FieldValue { name, value })
+            }
+            Instruction::DeleteSpan(span) => CacheInstruction::DeleteSpan(span),
+        };
+
+        Self::do_handle_cached(write, instruction)
+    }
+
+    pub fn do_handle_cached(write: &mut W, instruction: CacheInstruction) -> io::Result<()> {
         write.write_all(&[instruction.id().into()])?;
         match instruction {
-            Instruction::Restart => (),
-            Instruction::NewString(data) => encode::write_str(write, data)?,
-            Instruction::NewSpan { parent, span, name } => {
+            CacheInstruction::Restart => (),
+            CacheInstruction::NewString(data) => encode::write_str(write, data)?,
+            CacheInstruction::NewSpan { parent, span, name } => {
                 let parent = parent.map(Into::into).unwrap_or(0);
                 let span = span.into();
                 encode::write_uint(write, parent)?;
                 encode::write_uint(write, span)?;
                 Self::write_cache_str(write, name)?;
             }
-            Instruction::FinishedSpan => (),
-            Instruction::NewRecord(span) => {
+            CacheInstruction::FinishedSpan => (),
+            CacheInstruction::NewRecord(span) => {
                 let span: u64 = span.into();
                 encode::write_uint(write, span)?;
             }
-            Instruction::FinishedRecord => (),
-            Instruction::StartEvent {
+            CacheInstruction::FinishedRecord => (),
+            CacheInstruction::StartEvent {
                 time,
                 span,
                 target,
@@ -53,12 +101,12 @@ where
                 Self::write_cache_str(write, target)?;
                 encode::write_uint(write, priority)?;
             }
-            Instruction::FinishedEvent => (),
-            Instruction::AddValue(field_value) => {
+            CacheInstruction::FinishedEvent => (),
+            CacheInstruction::AddValue(field_value) => {
                 Self::write_cache_str(write, field_value.name)?;
                 Self::write_cache_value(write, field_value.value)?;
             }
-            Instruction::DeleteSpan(span) => {
+            CacheInstruction::DeleteSpan(span) => {
                 let span = span.into();
                 encode::write_uint(write, span)?;
             }
@@ -95,7 +143,7 @@ where
         Ok(())
     }
 }
-impl<W> TapeMachine<InstructionCachedRef> for Store<W>
+impl<W> TapeMachine<CacheInstructionSet> for Store<W>
 where
     W: io::Write + Send + 'static,
 {
@@ -103,10 +151,20 @@ where
         false
     }
 
-    fn handle(&mut self, instruction: Instruction<CacheString>) {
-        if let Err(e) = Self::do_handle(&mut self.0, instruction) {
-            panic!("{e}")
-        }
+    fn handle(&mut self, instruction: CacheInstruction) {
+        let _ = Self::do_handle_cached(&mut self.0, instruction);
+    }
+}
+impl<W> TapeMachine<InstructionSet> for Store<W>
+where
+    W: io::Write + Send + 'static,
+{
+    fn needs_restart(&mut self) -> bool {
+        false
+    }
+
+    fn handle(&mut self, instruction: Instruction) {
+        let _ = Self::do_handle(&mut self.0, instruction);
     }
 }
 
@@ -131,7 +189,7 @@ where
 
     pub fn forward<T>(&mut self, machine: &mut T) -> io::Result<()>
     where
-        T: TapeMachine<InstructionCachedRef>,
+        T: TapeMachine<InstructionSet>,
     {
         while let Some(instruction) = self.fetch_one()? {
             machine.handle(instruction);
@@ -140,7 +198,77 @@ where
         Ok(())
     }
 
-    pub fn fetch_one(&mut self) -> io::Result<Option<Instruction<CacheString>>> {
+    pub fn forward_cached<T>(&mut self, machine: &mut T) -> io::Result<()>
+    where
+        T: TapeMachine<CacheInstructionSet>,
+    {
+        while let Some(instruction) = self.fetch_one_cached()? {
+            machine.handle(instruction);
+        }
+
+        Ok(())
+    }
+
+    pub fn fetch_one(&mut self) -> io::Result<Option<Instruction>> {
+        let Some(instruction) = self.fetch_one_cached()? else {
+            return Ok(None);
+        };
+
+        Ok(Some(match instruction {
+            CacheInstruction::Restart => Instruction::Restart,
+            CacheInstruction::NewString(_) => return Err(UnexpectedCached.into()),
+            CacheInstruction::NewSpan { parent, span, name } => {
+                let name = match name {
+                    CacheString::Present(str) => str,
+                    CacheString::Cached(_) => return Err(UnexpectedCached.into()),
+                };
+
+                Instruction::NewSpan { parent, span, name }
+            }
+            CacheInstruction::FinishedSpan => Instruction::FinishedSpan,
+            CacheInstruction::NewRecord(span) => Instruction::NewRecord(span),
+            CacheInstruction::FinishedRecord => Instruction::FinishedRecord,
+            CacheInstruction::StartEvent {
+                time,
+                span,
+                target,
+                priority,
+            } => {
+                let target = match target {
+                    CacheString::Present(str) => str,
+                    CacheString::Cached(_) => return Err(UnexpectedCached.into()),
+                };
+
+                Instruction::StartEvent {
+                    time,
+                    span,
+                    target,
+                    priority,
+                }
+            }
+            CacheInstruction::FinishedEvent => Instruction::FinishedEvent,
+            CacheInstruction::AddValue(FieldValue { name, value }) => {
+                let name = match name {
+                    CacheString::Present(str) => str,
+                    CacheString::Cached(_) => return Err(UnexpectedCached.into()),
+                };
+                let value = match value {
+                    Value::String(CacheString::Present(str)) => Value::String(str),
+                    Value::String(CacheString::Cached(_)) => return Err(UnexpectedCached.into()),
+                    Value::Float(value) => Value::Float(value),
+                    Value::Integer(value) => Value::Integer(value),
+                    Value::Unsigned(value) => Value::Unsigned(value),
+                    Value::Bool(value) => Value::Bool(value),
+                    Value::ByteArray(items) => Value::ByteArray(items),
+                };
+
+                Instruction::AddValue(FieldValue { name, value })
+            }
+            CacheInstruction::DeleteSpan(span) => Instruction::DeleteSpan(span),
+        }))
+    }
+
+    pub fn fetch_one_cached(&mut self) -> io::Result<Option<CacheInstruction>> {
         let instruction = loop {
             let Some(instruction) = self.read.fill_buf()?.first().copied() else {
                 return Ok(None);
@@ -161,26 +289,26 @@ where
         })?;
 
         Ok(Some(match instruction {
-            InstructionId::Restart => Instruction::Restart,
-            InstructionId::NewString => Instruction::NewString(self.read_str()?),
+            InstructionId::Restart => CacheInstruction::Restart,
+            InstructionId::NewString => CacheInstruction::NewString(self.read_str()?),
             InstructionId::NewSpan => {
                 let parent: u64 = decode::read_int(&mut self.read).map_err(decode_err)?;
                 let span: u64 = decode::read_int(&mut self.read).map_err(decode_err)?;
                 let name = self.read_cache_str()?;
 
-                Instruction::NewSpan {
+                CacheInstruction::NewSpan {
                     parent: NonZeroU64::new(parent),
                     span: NonZeroU64::new(span).ok_or(ZeroSpan)?,
                     name,
                 }
             }
-            InstructionId::FinishedSpan => Instruction::FinishedSpan,
+            InstructionId::FinishedSpan => CacheInstruction::FinishedSpan,
             InstructionId::NewRecord => {
                 let span = decode::read_int(&mut self.read).map_err(decode_err)?;
 
-                Instruction::NewRecord(NonZeroU64::new(span).ok_or(ZeroSpan)?)
+                CacheInstruction::NewRecord(NonZeroU64::new(span).ok_or(ZeroSpan)?)
             }
-            InstructionId::FinishedRecord => Instruction::FinishedRecord,
+            InstructionId::FinishedRecord => CacheInstruction::FinishedRecord,
             InstructionId::StartEvent => {
                 let time: u64 = decode::read_int(&mut self.read).map_err(decode_err)?;
                 let time2: u64 = decode::read_int(&mut self.read).map_err(decode_err)?;
@@ -188,23 +316,23 @@ where
                 let target = Self::do_read_cache_str(&mut self.read, &mut self.buf1)?;
                 let priority = num_priority(decode::read_int(&mut self.read).map_err(decode_err)?);
 
-                Instruction::StartEvent {
+                CacheInstruction::StartEvent {
                     time: DateTime::from_timestamp(time as i64, time2 as u32).unwrap_or_default(),
                     span: NonZeroU64::new(span),
                     target,
                     priority,
                 }
             }
-            InstructionId::FinishedEvent => Instruction::FinishedEvent,
+            InstructionId::FinishedEvent => CacheInstruction::FinishedEvent,
             InstructionId::AddValue => {
                 let name = Self::do_read_cache_str(&mut self.read, &mut self.buf1)?;
                 let value = Self::do_read_value(&mut self.read, &mut self.buf2)?;
 
-                Instruction::AddValue(FieldValue { name, value })
+                CacheInstruction::AddValue(FieldValue { name, value })
             }
             InstructionId::DeleteSpan => {
                 let span: u64 = decode::read_int(&mut self.read).map_err(decode_err)?;
-                Instruction::DeleteSpan(NonZeroU64::new(span).ok_or(ZeroSpan)?)
+                CacheInstruction::DeleteSpan(NonZeroU64::new(span).ok_or(ZeroSpan)?)
             }
         }))
     }
@@ -331,6 +459,15 @@ impl From<EofOnMarker> for io::Error {
 pub struct ZeroSpan;
 impl From<ZeroSpan> for io::Error {
     fn from(value: ZeroSpan) -> Self {
+        decode_err(value)
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("Trying to load cached instruction file into uncached machine")]
+pub struct UnexpectedCached;
+impl From<UnexpectedCached> for io::Error {
+    fn from(value: UnexpectedCached) -> Self {
         decode_err(value)
     }
 }

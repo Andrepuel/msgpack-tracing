@@ -1,17 +1,17 @@
-use msgpack_tracing::{printer, rotate, storage, string_cache, tape};
+use msgpack_tracing::{printer, restart, rotate, storage, string_cache, tape};
 use std::fs::File;
 
 fn main() {
     if let Some(read) = std::env::args().nth(1) {
         storage::Load::new(File::open(read).unwrap())
-            .forward(&mut string_cache::StringUncache::new(
+            .forward_cached(&mut string_cache::StringUncache::new(
                 printer::Printer::new(std::io::stdout()),
             ))
             .unwrap();
         return;
     }
 
-    tape::install(string_cache::RestartableMachine::new(
+    tape::install(restart::RestartableMachine::new(
         string_cache::StringCache::new(rotate::Rotate::new("out.log", 64 * 1024 * 1024).unwrap()),
     ));
     tracing::info!("Installed logger");
