@@ -168,6 +168,7 @@ impl FieldValueOwned {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Value<'a, S> {
+    Debug(S),
     String(S),
     Float(f64),
     Integer(i64),
@@ -203,6 +204,7 @@ impl<'a, S> From<&'a [u8]> for Value<'a, S> {
 impl<'a> Value<'a, &'a str> {
     fn to_owned(self) -> ValueOwned {
         match self {
+            Value::Debug(str) => ValueOwned::Debug(str.to_owned()),
             Value::String(str) => ValueOwned::String(str.to_owned()),
             Value::Float(value) => ValueOwned::Float(value),
             Value::Integer(value) => ValueOwned::Integer(value),
@@ -215,6 +217,7 @@ impl<'a> Value<'a, &'a str> {
 
 #[derive(Clone)]
 pub enum ValueOwned {
+    Debug(String),
     String(String),
     Float(f64),
     Integer(i64),
@@ -225,6 +228,7 @@ pub enum ValueOwned {
 impl ValueOwned {
     pub fn as_ref(&self) -> Value<&str> {
         match self {
+            ValueOwned::Debug(value) => Value::Debug(value),
             ValueOwned::String(value) => Value::String(value),
             ValueOwned::Float(value) => Value::Float(*value),
             ValueOwned::Integer(value) => Value::Integer(*value),
@@ -346,7 +350,9 @@ where
     T: TapeMachine<InstructionSet>,
 {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.record_str(field, &format!("{value:?}"));
+        let value = format!("{value:?}");
+        let value = self.0.field_value(field, Value::Debug(value.as_str()));
+        self.0.handle(Instruction::AddValue(value));
     }
 
     fn record_f64(&mut self, field: &Field, value: f64) {

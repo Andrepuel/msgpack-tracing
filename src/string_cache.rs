@@ -73,6 +73,7 @@ where
 
     fn cache_value<'a>(&mut self, value: Value<'a, &'a str>) -> Value<'a, CacheString<'a>> {
         match value {
+            Value::Debug(string) => Value::Debug(self.cache_string(string)),
             Value::String(string) => Value::String(self.cache_string(string)),
             Value::Float(value) => Value::Float(value),
             Value::Integer(value) => Value::Integer(value),
@@ -190,6 +191,7 @@ where
         value: Value<'a, CacheString<'a>>,
     ) -> Value<'a, &'a str> {
         match value {
+            Value::Debug(string) => Value::Debug(Self::uncache(strings, string)),
             Value::String(string) => Value::String(Self::uncache(strings, string)),
             Value::Float(value) => Value::Float(value),
             Value::Integer(value) => Value::Integer(value),

@@ -30,7 +30,7 @@ fn recurse(level: i32, out: i32) {
     let _span = tracing::info_span!("recursing", level).entered();
     let next = level - 1;
     _span.record("level", "before");
-    tracing::info!(next, "enter");
+    tracing::info!(level=?LevelDebug(level), next, "enter");
     recurse(next, 0);
     _span.record("level", "new");
     _span.record("level", "new2");
@@ -42,3 +42,6 @@ fn recurse(level: i32, out: i32) {
         recurse(level, next_out);
     }
 }
+
+#[derive(Debug)]
+struct LevelDebug(#[expect(unused)] i32);

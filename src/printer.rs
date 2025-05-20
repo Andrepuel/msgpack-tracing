@@ -47,6 +47,7 @@ where
         O: Write,
     {
         match value {
+            ValueOwned::Debug(str) => write!(out, "{str}"),
             ValueOwned::String(str) => write!(out, "{str:?}"),
             ValueOwned::Float(value) => write!(out, "{value}"),
             ValueOwned::Integer(value) => write!(out, "{value}"),

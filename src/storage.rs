@@ -50,6 +50,7 @@ where
             Instruction::AddValue(FieldValue { name, value }) => {
                 let name = CacheString::Present(name);
                 let value = match value {
+                    Value::Debug(str) => Value::String(CacheString::Present(str)),
                     Value::String(str) => Value::String(CacheString::Present(str)),
                     Value::Float(data) => Value::Float(data),
                     Value::Integer(data) => Value::Integer(data),
@@ -128,6 +129,10 @@ where
 
     fn write_cache_value(write: &mut W, value: Value<CacheString>) -> io::Result<()> {
         match value {
+            Value::Debug(str) => {
+                encode::write_array_len(write, 1)?;
+                Self::write_cache_str(write, str)?;
+            }
             Value::String(str) => Self::write_cache_str(write, str)?,
             Value::Float(data) => encode::write_f64(write, data)?,
             Value::Integer(data) => {
@@ -253,6 +258,8 @@ where
                     CacheString::Cached(_) => return Err(UnexpectedCached.into()),
                 };
                 let value = match value {
+                    Value::Debug(CacheString::Present(str)) => Value::Debug(str),
+                    Value::Debug(CacheString::Cached(_)) => return Err(UnexpectedCached.into()),
                     Value::String(CacheString::Present(str)) => Value::String(str),
                     Value::String(CacheString::Cached(_)) => return Err(UnexpectedCached.into()),
                     Value::Float(value) => Value::Float(value),
@@ -354,6 +361,10 @@ where
         buf: &'a mut Vec<u8>,
     ) -> io::Result<Value<'a, CacheString<'a>>> {
         Ok(match Self::do_peek_marker(read)? {
+            Marker::FixArray(1) => {
+                read.consume(1);
+                Value::Debug(Self::do_read_cache_str(read, buf)?)
+            }
             Marker::FixPos(_)
             | Marker::FixNeg(_)
             | Marker::I8

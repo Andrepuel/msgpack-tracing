@@ -18,7 +18,7 @@ pub struct Rotate {
 }
 impl Rotate {
     pub fn new<P: AsRef<Path>>(path: P, max_len: u64) -> io::Result<Self> {
-        let file = File::options().append(true).open(&path)?;
+        let file = File::options().append(true).create(true).open(&path)?;
         let path1 = path
             .as_ref()
             .to_str()
