@@ -1,7 +1,14 @@
 [package]
+authors = ["André Puel <andrepuel@gmail.com>"]
+description = "Compact storage for tracing using msgpack"
+homepage = "https://github.com/Andrepuel/msgpack-tracing"
+keywords = ["logging", "metrics", "subscriber", "tracing"]
+license = "MIT"
 name = "msgpack-tracing"
+repository = "https://github.com/Andrepuel/msgpack-tracing.git"
 version = "0.1.0"
 edition = "2024"
+readme = "README.md"
 
 [features]
 default = ["env-filter"]
