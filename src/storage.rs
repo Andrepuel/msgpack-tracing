@@ -67,7 +67,7 @@ where
 
     fn write_cache_str(write: &mut W, str: CacheString) -> io::Result<()> {
         match str {
-            CacheString::Small(data) => encode::write_str(write, data)?,
+            CacheString::Present(data) => encode::write_str(write, data)?,
             CacheString::Cached(index) => {
                 CacheIndex::from(index).write(write)?;
             }
@@ -259,7 +259,7 @@ where
     ) -> io::Result<CacheString<'a>> {
         Ok(match Self::do_peek_marker(read)? {
             Marker::FixStr(_) | Marker::Str8 | Marker::Str16 | Marker::Str32 => {
-                CacheString::Small(Self::do_read_str(read, buf)?)
+                CacheString::Present(Self::do_read_str(read, buf)?)
             }
             Marker::FixExt1 | Marker::FixExt2 | Marker::FixExt4 | Marker::FixExt8 => {
                 CacheString::Cached(CacheIndex::read(read)?.into())

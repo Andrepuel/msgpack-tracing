@@ -3,6 +3,7 @@ use crate::tape::{
 };
 use chrono::{DateTime, Utc};
 use nu_ansi_term::{Color, Style};
+use std::borrow::Cow;
 use std::fmt::Write;
 use std::num::NonZeroU64;
 use std::{collections::HashMap, io};
@@ -10,7 +11,6 @@ use tracing::Level;
 
 pub struct Printer<W> {
     out: W,
-    strings: Vec<String>,
     span: HashMap<NonZeroU64, SpanRecords>,
     new_records: Option<(NonZeroU64, SpanRecords)>,
     new_event: Option<NewEvent>,
@@ -22,7 +22,6 @@ where
     pub fn new(out: W) -> Self {
         Self {
             out,
-            strings: Default::default(),
             span: Default::default(),
             new_records: None,
             new_event: None,
@@ -31,8 +30,22 @@ where
 
     fn get_str<'a>(&'a self, str: &'a CacheStringOwned) -> &'a str {
         match str {
-            CacheStringOwned::Small(small) => small.as_str(),
-            CacheStringOwned::Cached(index) => self.strings.get(*index as usize).unwrap(),
+            CacheStringOwned::Present(small) => small.as_str(),
+            CacheStringOwned::Cached(_) => panic!("Cache not expected"),
+        }
+    }
+
+    fn get_span(&self, span: NonZeroU64) -> Cow<SpanRecords> {
+        match self.span.get(&span) {
+            Some(span) => Cow::Borrowed(span),
+            None => Cow::Owned(SpanRecords::lost(span)),
+        }
+    }
+
+    fn take_span(&mut self, span: NonZeroU64) -> SpanRecords {
+        match self.span.remove(&span) {
+            Some(records) => records,
+            None => SpanRecords::lost(span),
         }
     }
 
@@ -59,11 +72,11 @@ where
     where
         F: FnMut(&SpanRecords),
     {
-        let records = self.span.get(&span).unwrap();
+        let records = self.get_span(span);
         if let Some(parent) = records.parent {
             self.span_iter(parent, f);
         }
-        f(records);
+        f(&records);
     }
 
     fn level_style(level: Level) -> Color {
@@ -108,10 +121,8 @@ where
 
     fn handle(&mut self, instruction: Instruction) {
         match instruction {
-            Instruction::Restart => {
-                self.strings.clear();
-            }
-            Instruction::NewString(string) => self.strings.push(string.to_owned()),
+            Instruction::Restart => {}
+            Instruction::NewString(_) => {}
             Instruction::NewSpan { parent, span, name } => {
                 assert!(self.new_records.is_none());
                 self.new_records = Some((
@@ -129,7 +140,7 @@ where
             }
             Instruction::NewRecord(id) => {
                 assert!(self.new_records.is_none());
-                self.new_records = Some((id, self.span.remove(&id).unwrap()));
+                self.new_records = Some((id, self.take_span(id)));
             }
             Instruction::StartEvent {
                 time,

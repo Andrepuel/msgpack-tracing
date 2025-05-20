@@ -1,18 +1,19 @@
+use msgpack_tracing::{printer, rotate, storage, string_cache, tape};
 use std::fs::File;
-pub mod printer;
-pub mod rotate;
-pub mod storage;
-pub mod tape;
 
 fn main() {
     if let Some(read) = std::env::args().nth(1) {
         storage::Load::new(File::open(read).unwrap())
-            .forward(&mut printer::Printer::new(std::io::stdout()))
+            .forward(&mut string_cache::StringUncache::new(
+                printer::Printer::new(std::io::stdout()),
+            ))
             .unwrap();
         return;
     }
 
-    tape::install(rotate::Rotate::new("out.log", 64 * 1024 * 1024).unwrap());
+    tape::install(string_cache::RestartableMachine::new(
+        string_cache::StringCache::new(rotate::Rotate::new("out.log", 64 * 1024 * 1024).unwrap()),
+    ));
     tracing::info!("Installed logger");
     for i in 0.. {
         tracing::info!(i, "Spamming logs");
