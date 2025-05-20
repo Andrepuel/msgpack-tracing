@@ -24,9 +24,9 @@ fn main() {
 
 fn install_logger(path: &str, rotate: Option<u64>) {
     match rotate {
-        Some(max_len) => msgpack_tracing::install_rotate_logger(path, max_len, true).unwrap(),
+        Some(max_len) => msgpack_tracing::install_rotate_logger(path, max_len, Some(true)).unwrap(),
         None => {
-            msgpack_tracing::install_logger(File::create(path).unwrap(), true);
+            msgpack_tracing::install_logger(File::create(path).unwrap(), Some(true));
         }
     }
 }

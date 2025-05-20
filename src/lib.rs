@@ -1,3 +1,4 @@
+use printer::Printer;
 use restart::RestartableMachine;
 use rotate::Rotate;
 use std::{io, path::Path};
@@ -6,7 +7,6 @@ use string_cache::StringCache;
 use tape::{InstructionSet, TapeMachine, TapeMachineLogger};
 use tracing_subscriber::{Registry, layer::SubscriberExt, util::SubscriberInitExt};
 
-#[cfg(feature = "printer")]
 pub mod printer;
 pub mod restart;
 pub mod rotate;
@@ -14,7 +14,7 @@ pub mod storage;
 pub mod string_cache;
 pub mod tape;
 
-pub fn install_logger<W>(out: W, with_stderr: bool)
+pub fn install_logger<W>(out: W, with_stderr: Option<bool>)
 where
     W: io::Write + Send + 'static,
 {
@@ -24,14 +24,14 @@ where
 pub fn install_rotate_logger<P: AsRef<Path>>(
     path: P,
     max_len: u64,
-    with_stderr: bool,
+    with_stderr: Option<bool>,
 ) -> io::Result<()> {
     let rotate = rotate_logger(path.as_ref(), max_len)?;
     do_installer_logger(rotate, with_stderr);
     Ok(())
 }
 
-fn do_installer_logger<T>(logger: TapeMachineLogger<T>, with_stderr: bool)
+fn do_installer_logger<T>(logger: TapeMachineLogger<T>, with_stderr: Option<bool>)
 where
     T: TapeMachine<InstructionSet>,
 {
@@ -47,10 +47,10 @@ where
 
     let registry = registry.with(logger);
     let init = match with_stderr {
-        true => registry
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        Some(color) => registry
+            .with(printer_logger(io::stderr(), color))
             .try_init(),
-        false => registry.try_init(),
+        None => registry.try_init(),
     };
 
     match init {
@@ -76,4 +76,11 @@ pub fn rotate_logger(
     Ok(TapeMachineLogger::new(RestartableMachine::new(
         StringCache::new(Rotate::new(path, max_len)?),
     )))
+}
+
+pub fn printer_logger<W>(out: W, color: bool) -> TapeMachineLogger<impl TapeMachine<InstructionSet>>
+where
+    W: io::Write + Send + 'static,
+{
+    TapeMachineLogger::new(Printer::new(out, color))
 }

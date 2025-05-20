@@ -5,12 +5,11 @@ edition = "2024"
 
 [features]
 default = ["env-filter"]
-printer = ["nu-ansi-term"]
 env-filter = ["tracing-subscriber/env-filter"]
 
 [dependencies]
 chrono = "0.4.41"
-nu-ansi-term = { version = "0.50.1", optional = true }
+nu-ansi-term = "0.50.1"
 rmp = "0.8.14"
 thiserror = "2.0.12"
 tracing = "0.1.41"
