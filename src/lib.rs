@@ -14,24 +14,31 @@ pub mod storage;
 pub mod string_cache;
 pub mod tape;
 
-pub fn install_logger<W>(out: W, with_stderr: Option<bool>)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WithConsole {
+    AnsiColors,
+    PureText,
+    Disabled,
+}
+
+pub fn install_logger<W>(out: W, console: WithConsole)
 where
     W: io::Write + Send + 'static,
 {
-    do_installer_logger(out_logger(out), with_stderr);
+    do_installer_logger(out_logger(out), console);
 }
 
 pub fn install_rotate_logger<P: AsRef<Path>>(
     path: P,
     max_len: u64,
-    with_stderr: Option<bool>,
+    console: WithConsole,
 ) -> io::Result<()> {
     let rotate = rotate_logger(path.as_ref(), max_len)?;
-    do_installer_logger(rotate, with_stderr);
+    do_installer_logger(rotate, console);
     Ok(())
 }
 
-fn do_installer_logger<T>(logger: TapeMachineLogger<T>, with_stderr: Option<bool>)
+fn do_installer_logger<T>(logger: TapeMachineLogger<T>, console: WithConsole)
 where
     T: TapeMachine<InstructionSet>,
 {
@@ -46,15 +53,18 @@ where
     let filter: Option<()> = None;
 
     let registry = registry.with(logger);
-    let init = match with_stderr {
-        Some(color) => registry
-            .with(printer_logger(io::stderr(), color))
+    let init = match console {
+        console @ WithConsole::AnsiColors | console @ WithConsole::PureText => registry
+            .with(printer_logger(
+                io::stderr(),
+                console == WithConsole::AnsiColors,
+            ))
             .try_init(),
-        None => registry.try_init(),
+        WithConsole::Disabled => registry.try_init(),
     };
 
     match init {
-        Ok(()) => tracing::debug!(?filter, ?with_stderr, "Logger initialized"),
+        Ok(()) => tracing::trace!(?filter, ?console, "Logger initialized"),
         Err(e) => {
             tracing::warn!(%e, "Trying to initialize logger twice");
             tracing::debug!(?e);
