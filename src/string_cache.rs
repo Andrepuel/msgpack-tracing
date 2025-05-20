@@ -89,15 +89,15 @@ where
         }
 
         let id = self.strings.len() as u64;
-        let small = !matches!(
+        let present = !matches!(
             (id, string.len()),
-            (0..=0xffff, 4..)
-                | (0x1_0000..=0xff_ffff, 5..)
-                | (0x100_0000..=0xff_ffff_ffff, 7..)
+            (0..=0xffff, 4..=255)
+                | (0x1_0000..=0xff_ffff, 5..=255)
+                | (0x100_0000..=0xff_ffff_ffff, 7..=255)
                 | (_, 11..)
         );
 
-        if small {
+        if present {
             CacheString::Present(string)
         } else {
             self.forward.handle(CacheInstruction::NewString(string));
