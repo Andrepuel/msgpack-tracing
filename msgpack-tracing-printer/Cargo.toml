@@ -8,8 +8,8 @@ name = "msgpack-tracing-printer"
 repository = "https://github.com/Andrepuel/msgpack-tracing.git"
 version = "0.1.0"
 edition = "2024"
-readme = "README.md"
+readme = "../README.md"
 
 [dependencies]
 atty = "0.2.14"
-msgpack-tracing = { path = "../" }
+msgpack-tracing = { path = "../", version = "0.1"}
